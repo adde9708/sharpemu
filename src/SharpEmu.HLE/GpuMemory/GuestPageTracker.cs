@@ -5,7 +5,7 @@ using System.Diagnostics;
 
 namespace SharpEmu.HLE.GpuMemory;
 
-public sealed class GuestPageTracker
+public sealed class GuestPageTracker(PageGuard pages)
 {
     private const ulong BlockBytes = TrackerLayout.BlockBytes;
     private const ulong PageBytes = TrackerLayout.PageBytes;
@@ -13,12 +13,10 @@ public sealed class GuestPageTracker
     [ThreadStatic]
     private static GuestPageTracker? _uploadOwner;
 
-    private readonly PageGuard _pages;
+    private readonly PageGuard _pages = pages;
     private readonly TrackedRegion?[] _regions = new TrackedRegion?[TrackerLayout.BlockCount];
     private readonly object _regionGate = new();
     private readonly CpuDirtySummary _cpuDirtySummary = new();
-
-    public GuestPageTracker(PageGuard pages) => _pages = pages;
 
     public bool HasCpuDirtyPages(ulong vaddr, ulong size)
     {
@@ -219,6 +217,27 @@ public sealed class GuestPageTracker
     {
         RejectUploadCallbackReentry();
         VisitRegions(vaddr, size, create: true, static (_, _, _) => false);
+
+        // A read-side upload of a range with no CPU-dirty page is a no-op walk: the upload mask
+        // is empty, so nothing is cleared, no range is visited and no protection changes. The
+        // summary bit answers that without a lock; uploadFunc still runs so the caller keeps
+        // its contract of being offered every range, empty or not.
+        if (!isWritten && IsKnownCpuClean(vaddr, size))
+        {
+            var previousFastOwner = _uploadOwner;
+            _uploadOwner = this;
+            try
+            {
+                uploadFunc();
+            }
+            finally
+            {
+                _uploadOwner = previousFastOwner;
+            }
+
+            return;
+        }
+
         var previousOwner = _uploadOwner;
         _uploadOwner = this;
         var held = new List<TrackedRegion>();
