@@ -7818,17 +7818,32 @@ public static partial class Gen5SpirvTranslator
             return blocks;
         }
 
+        // Blocks are built in ascending StartPc, so the search is a binary scan. Callers run
+        // this per block, which made resolving branch targets quadratic in the block count.
         private static bool TryFindBlock(
             IReadOnlyList<ShaderBlock> blocks,
             uint pc,
             out int block)
         {
-            for (var index = 0; index < blocks.Count; index++)
+            int low = 0;
+            int high = blocks.Count - 1;
+            while (low <= high)
             {
-                if (blocks[index].StartPc == pc)
+                var middle = low + ((high - low) >> 1);
+                var startPc = blocks[middle].StartPc;
+                if (startPc == pc)
                 {
-                    block = index;
+                    block = middle;
                     return true;
+                }
+
+                if (startPc < pc)
+                {
+                    low = middle + 1;
+                }
+                else
+                {
+                    high = middle - 1;
                 }
             }
 
