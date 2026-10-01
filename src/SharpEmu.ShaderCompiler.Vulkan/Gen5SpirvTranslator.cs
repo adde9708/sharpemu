@@ -1522,15 +1522,34 @@ public static partial class Gen5SpirvTranslator
                 }
             }
 
-            foreach (var (outerHeader, outerLatch) in latchByHeader)
+            return LoopRegionsAreProperlyNested(latchByHeader, blocks.Count);
+        }
+
+        // A loop that opens strictly inside another and reaches past its latch leaves the two
+        // regions interleaved, which structured control flow cannot express. Block indices are the
+        // headers, so walking them visits every header in ascending order and a stack of the loops
+        // still open replaces comparing every pair.
+        private static bool LoopRegionsAreProperlyNested(Dictionary<int, int> latchByHeader, int blockCount)
+        {
+            var openHeaders = new List<int>();
+            for (var header = 0; header < blockCount; header++)
             {
-                foreach (var (innerHeader, innerLatch) in latchByHeader)
+                if (!latchByHeader.TryGetValue(header, out var latch))
                 {
-                    if (outerHeader < innerHeader && innerHeader <= outerLatch && innerLatch > outerLatch)
-                    {
-                        return false;
-                    }
+                    continue;
                 }
+
+                while (openHeaders.Count != 0 && latchByHeader[openHeaders[openHeaders.Count - 1]] < header)
+                {
+                    openHeaders.RemoveAt(openHeaders.Count - 1);
+                }
+
+                if (openHeaders.Count != 0 && latch > latchByHeader[openHeaders[openHeaders.Count - 1]])
+                {
+                    return false;
+                }
+
+                openHeaders.Add(header);
             }
 
             return true;
