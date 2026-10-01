@@ -15,23 +15,22 @@ public delegate bool ResidentGuestBytesReader(ulong address, Span<byte> destinat
 // those words and reuses the result while every one of them is unchanged, so a draw
 // that re-binds the same resources skips the descriptor walk. Any failed read, any
 // GPU-owned range and any byte difference make the entry miss; nothing is guessed.
-public sealed class ResourceMaterializationCache
+public sealed class ResourceMaterializationCache(int generationCapacity = 16384)
 {
     // Two generations approximate LRU: a full young generation becomes the old one,
     // and an old entry that is used again is promoted back.
-    private readonly int _generationCapacity;
+    private readonly int _generationCapacity = Math.Max(1, generationCapacity);
     private Dictionary<ulong, Entry> _young = new();
     private Dictionary<ulong, Entry> _old = new();
     private byte[] _scratch = new byte[256];
-
-    public ResourceMaterializationCache(int generationCapacity = 16384)
-    {
-        _generationCapacity = Math.Max(1, generationCapacity);
-    }
+    // Full-entry layout: every recorded range written at its own offset, so a rejected
+    // validation is already in the shape the table refresh needs and the guest is not read twice.
+    private byte[] _current = new byte[256];
 
     private static long _totalHits;
     private static long _totalMisses;
     private static long _totalUncacheable;
+    private static long _totalTableRefreshes;
 
     public long Hits { get; private set; }
     public long Misses { get; private set; }
@@ -44,9 +43,10 @@ public sealed class ResourceMaterializationCache
         var hits = Interlocked.Exchange(ref _totalHits, 0);
         var misses = Interlocked.Exchange(ref _totalMisses, 0);
         var uncacheable = Interlocked.Exchange(ref _totalUncacheable, 0);
+        var refreshes = Interlocked.Exchange(ref _totalTableRefreshes, 0);
         var total = hits + misses;
         return FormattableString.Invariant(
-            $"[PERF][RESOURCE_CACHE] hits={hits} misses={misses} uncacheable={uncacheable} hit_rate={(total == 0 ? 0 : hits * 100.0 / total):F1}%");
+            $"[PERF][RESOURCE_CACHE] hits={hits} misses={misses} uncacheable={uncacheable} refreshes={refreshes} success_rate={(total == 0 ? 0 : (hits + refreshes) * 100.0 / (total + refreshes)):F1}%");
     }
 
     public bool Materialize(
@@ -60,7 +60,7 @@ public sealed class ResourceMaterializationCache
         var key = KeyOf(plan, inputs);
         if (TryFind(key, plan, inputs, out var cached))
         {
-            if (Validate(cached, residentReader))
+            if (Validate(cached, residentReader, cached.TableRefreshable, out var captured))
             {
                 Hits++;
                 Interlocked.Increment(ref _totalHits);
@@ -70,9 +70,10 @@ public sealed class ResourceMaterializationCache
                 return true;
             }
 
-            if (TryRefreshTable(key, cached, plan, inputs, residentReader, out var refreshed))
+            if (TryRefreshTable(key, cached, plan, inputs, residentReader, captured, out var refreshed))
             {
                 TableRefreshes++;
+                Interlocked.Increment(ref _totalTableRefreshes);
                 snapshot = refreshed.Snapshot;
                 specialization = refreshed.Specialization;
                 failure = default;
@@ -113,23 +114,34 @@ public sealed class ResourceMaterializationCache
     // specialization reads or extends the table (indirect or candidate tables), when the table
     // now reads a word the entry did not validate, or when a word moved between the two reads.
     private bool TryRefreshTable(ulong key, Entry cached, ShaderResourcePlan plan, ResourceRuntimeInputs inputs,
-        ResidentGuestBytesReader residentReader, out Entry refreshed)
+        ResidentGuestBytesReader residentReader, bool captured, out Entry refreshed)
     {
         refreshed = null!;
         if (!cached.TableRefreshable)
             return false;
 
-        var current = new byte[cached.Bytes.Length];
-        for (var index = 0; index < cached.RangeAddresses.Length; index++)
+        if (_current.Length < cached.Bytes.Length)
+            _current = new byte[Math.Max(cached.Bytes.Length, _current.Length * 2)];
+
+        // Validate already read every range into _current at its recorded offset, so the
+        // common rejected-validation path costs no second guest read. A read that failed
+        // leaves captured false and the ranges are read again here.
+        if (!captured)
         {
-            if (!residentReader(cached.RangeAddresses[index], current.AsSpan(cached.RangeOffsets[index], cached.RangeLengths[index]), cached.RangeClean[index]))
-                return false;
+            for (var index = 0; index < cached.RangeAddresses.Length; index++)
+            {
+                if (!residentReader(cached.RangeAddresses[index],
+                        _current.AsSpan(cached.RangeOffsets[index], cached.RangeLengths[index]), cached.RangeClean[index]))
+                    return false;
+            }
         }
+
+        var current = _current.AsSpan(0, cached.Bytes.Length);
 
         var changed = false;
         for (var offset = 0; offset < current.Length; offset += sizeof(uint))
         {
-            if (current.AsSpan(offset, sizeof(uint)).SequenceEqual(cached.Bytes.AsSpan(offset, sizeof(uint))))
+            if (current.Slice(offset, sizeof(uint)).SequenceEqual(cached.Bytes.AsSpan(offset, sizeof(uint))))
                 continue;
             if (!cached.WordTableOnly[offset / sizeof(uint)])
                 return false;
@@ -155,7 +167,7 @@ public sealed class ResourceMaterializationCache
         foreach (var (address, word, _, _) in recorder.Reads)
         {
             if (!TryFindWord(cached, address, out var offset) ||
-                System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(current.AsSpan(offset, sizeof(uint))) != word)
+                System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(current.Slice(offset, sizeof(uint))) != word)
                 return false;
         }
 
@@ -176,7 +188,8 @@ public sealed class ResourceMaterializationCache
             RangeClean = cached.RangeClean,
             WordTableOnly = cached.WordTableOnly,
             TableRefreshable = true,
-            Bytes = current,
+            // Copied, not aliased: the entry outlives this call and _current is reused.
+            Bytes = current.ToArray(),
             Snapshot = new ResourceSnapshot
             {
                 Buffers = previous.Buffers,
@@ -261,8 +274,29 @@ public sealed class ResourceMaterializationCache
         _young[key] = entry;
     }
 
-    private bool Validate(Entry entry, ResidentGuestBytesReader residentReader)
+    private bool Validate(Entry entry, ResidentGuestBytesReader residentReader, bool capture, out bool captured)
     {
+        captured = false;
+        if (capture)
+        {
+            if (_current.Length < entry.Bytes.Length)
+                _current = new byte[Math.Max(entry.Bytes.Length, _current.Length * 2)];
+            for (var index = 0; index < entry.RangeAddresses.Length; index++)
+            {
+                if (!residentReader(entry.RangeAddresses[index],
+                        _current.AsSpan(entry.RangeOffsets[index], entry.RangeLengths[index]), entry.RangeClean[index]))
+                    return false;
+            }
+
+            for (var index = 0; index < entry.RangeAddresses.Length; index++)
+                if (!_current.AsSpan(entry.RangeOffsets[index], entry.RangeLengths[index])
+                        .SequenceEqual(entry.Bytes.AsSpan(entry.RangeOffsets[index], entry.RangeLengths[index])))
+                    return false;
+
+            captured = true;
+            return true;
+        }
+
         for (var index = 0; index < entry.RangeAddresses.Length; index++)
         {
             var length = entry.RangeLengths[index];
