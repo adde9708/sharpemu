@@ -36,29 +36,30 @@ public static partial class Gen5SpirvTranslator
             return false;
         }
 
-        if (request.Stage == ShaderStage.Pixel)
+        if (request.Stage != ShaderStage.Pixel)
         {
-            if (request.PixelOutputs.Count > 8 || request.PixelOutputs.Any(output => output.GuestSlot > 7))
-            {
-                error = "pixel outputs must contain at most eight guest slots in the 0..7 range";
-                return false;
-            }
-
-            if (request.PixelOutputs.Select(output => output.GuestSlot).Distinct().Count() != request.PixelOutputs.Count ||
-                request.PixelOutputs.Select(output => output.HostLocation).Distinct().Count() != request.PixelOutputs.Count)
-            {
-                error = "pixel output guest slots and host locations must be unique";
-                return false;
-            }
-
-            if (request.PixelOutputs.Any(output => output.HostLocation >= request.PixelOutputs.Count))
-            {
-                error = "pixel output host locations must be dense in the 0..N-1 range";
-                return false;
-            }
+            return new CompilationContext(request).TryCompile(out shader, out error);
+        }
+        if (request.PixelOutputs.Count > 8 || request.PixelOutputs.Any(output => output.GuestSlot > 7))
+        {
+            error = "pixel outputs must contain at most eight guest slots in the 0..7 range";
+            return false;
         }
 
-        return new CompilationContext(request).TryCompile(out shader, out error);
+        if (request.PixelOutputs.Select(output => output.GuestSlot).Distinct().Count() != request.PixelOutputs.Count ||
+            request.PixelOutputs.Select(output => output.HostLocation).Distinct().Count() != request.PixelOutputs.Count)
+        {
+            error = "pixel output guest slots and host locations must be unique";
+            return false;
+        }
+
+        if (!request.PixelOutputs.Any(output => output.HostLocation >= request.PixelOutputs.Count))
+        {
+            return new CompilationContext(request).TryCompile(out shader, out error);
+        }
+        error = "pixel output host locations must be dense in the 0..N-1 range";
+        return false;
+
     }
 
     private sealed partial class CompilationContext
@@ -141,7 +142,7 @@ public static partial class Gen5SpirvTranslator
                     instruction.Control is Gen5ImageControl &&
                     (instruction.Opcode.StartsWith("ImageSample", StringComparison.Ordinal) ||
                      instruction.Opcode.StartsWith("ImageGather4", StringComparison.Ordinal)) &&
-                    instruction.Opcode.EndsWith("O", StringComparison.Ordinal)))
+                    instruction.Opcode.EndsWith('O')))
             {
                 _module.AddCapability(SpirvCapability.ImageGatherExtended);
             }
@@ -235,22 +236,24 @@ public static partial class Gen5SpirvTranslator
         // The runtime array types are shared by every block, so their stride is decorated once.
         private uint WordRuntimeArray()
         {
-            if (_wordRuntimeArray == 0)
+            if (_wordRuntimeArray != 0)
             {
-                _wordRuntimeArray = _module.TypeRuntimeArray(_uintType);
-                _module.AddDecoration(_wordRuntimeArray, SpirvDecoration.ArrayStride, sizeof(uint));
+                return _wordRuntimeArray;
             }
+            _wordRuntimeArray = _module.TypeRuntimeArray(_uintType);
+            _module.AddDecoration(_wordRuntimeArray, SpirvDecoration.ArrayStride, sizeof(uint));
 
             return _wordRuntimeArray;
         }
 
         private uint AddressRuntimeArray()
         {
-            if (_addressRuntimeArray == 0)
+            if (_addressRuntimeArray != 0)
             {
-                _addressRuntimeArray = _module.TypeRuntimeArray(_ulongType);
-                _module.AddDecoration(_addressRuntimeArray, SpirvDecoration.ArrayStride, sizeof(ulong));
+                return _addressRuntimeArray;
             }
+            _addressRuntimeArray = _module.TypeRuntimeArray(_ulongType);
+            _module.AddDecoration(_addressRuntimeArray, SpirvDecoration.ArrayStride, sizeof(ulong));
 
             return _addressRuntimeArray;
         }
@@ -399,18 +402,18 @@ public static partial class Gen5SpirvTranslator
         private uint LoadShaderDataDword(uint dwordIndex)
         {
             var layout = _request.Bindings;
-            if (layout.UsesPushData)
+            if (!layout.UsesPushData)
             {
-                var pointer = _module.AddInstruction(
-                    SpirvOp.AccessChain,
-                    _pushConstantUintPointer,
-                    _pushData,
-                    UInt(0),
-                    IAdd(UInt(layout.PushDataStartDword), dwordIndex));
-                return Load(_uintType, pointer);
+                return LoadBlockWord(_shaderData, dwordIndex);
             }
+            var pointer = _module.AddInstruction(
+                SpirvOp.AccessChain,
+                _pushConstantUintPointer,
+                _pushData,
+                UInt(0),
+                IAdd(UInt(layout.PushDataStartDword), dwordIndex));
+            return Load(_uintType, pointer);
 
-            return LoadBlockWord(_shaderData, dwordIndex);
         }
 
         // A bounds-checked dword of a storage block; outside the block reads zero.
@@ -440,12 +443,7 @@ public static partial class Gen5SpirvTranslator
         private (uint Low, uint High) LoadShaderBase()
         {
             var layout = _request.Bindings;
-            if (!layout.UsesShaderBase)
-            {
-                return (UInt(0), UInt(0));
-            }
-
-            return (LoadShaderDataDword(UInt(layout.ShaderBaseDword)), LoadShaderDataDword(UInt(layout.ShaderBaseDword + 1)));
+            return !layout.UsesShaderBase ? (UInt(0), UInt(0)) : (LoadShaderDataDword(UInt(layout.ShaderBaseDword)), LoadShaderDataDword(UInt(layout.ShaderBaseDword + 1)));
         }
 
         private uint ComputeThreadLimit(uint component)
@@ -769,7 +767,7 @@ public static partial class Gen5SpirvTranslator
 
                     value = LoadFlattenedWord(UInt(slot));
                 }
-                else if (entry.Kind == MemoryResourceKind.ScalarBuffer && entry.DeviceDescriptor)
+                else if (entry is { Kind: MemoryResourceKind.ScalarBuffer, DeviceDescriptor: true })
                 {
                     if (instruction.Sources.Count == 0 || instruction.Sources[0].Kind != Gen5OperandKind.ScalarRegister)
                     {
@@ -1055,12 +1053,18 @@ public static partial class Gen5SpirvTranslator
             // Inactive lanes must not touch any of the three storages.
             EmitExecConditional(() =>
             {
-                if (canShare && canPrivate)
-                    EmitConditional(isShared, Shared, () => EmitConditional(isPrivate, Private, Global));
-                else if (canShare)
-                    EmitConditional(isShared, Shared, Global);
-                else
-                    EmitConditional(isPrivate, Private, Global);
+                switch (canShare)
+                {
+                    case true when canPrivate:
+                        EmitConditional(isShared, Shared, () => EmitConditional(isPrivate, Private, Global));
+                        break;
+                    case true:
+                        EmitConditional(isShared, Shared, Global);
+                        break;
+                    default:
+                        EmitConditional(isPrivate, Private, Global);
+                        break;
+                }
             });
             return true;
         }
@@ -1430,45 +1434,46 @@ public static partial class Gen5SpirvTranslator
                 return true;
             }
 
-            if (request.IndirectRootByMemoryIndex.TryGetValue(memoryIndex, out var keyMemoryIndex) && imageInfo.IndirectSearchIterations != 0)
+            if (!request.IndirectRootByMemoryIndex.TryGetValue(memoryIndex, out var keyMemoryIndex) ||
+                imageInfo.IndirectSearchIterations == 0)
             {
-                if (!HasFlattenedTable)
+                return false;
+            }
+            if (!HasFlattenedTable)
+            {
+                error = "indirect image access without a flattened table binding";
+                return false;
+            }
+
+            var candidates = info.Images[(int)imageInfo.IndirectRoot].IndirectResources;
+            var candidateElements = new List<(uint Resource, uint Element)>();
+            foreach (var candidate in candidates)
+            {
+                if (candidate >= info.Images.Count)
                 {
-                    error = "indirect image access without a flattened table binding";
+                    error = $"indirect candidate {candidate} is outside the image table";
+                    return false;
+                }
+                var candidateKind = ImageDescriptorBinding.ForImage(info.Images[(int)candidate]);
+                if (candidateKind is null || !_imageClasses.TryGetValue(candidateKind.Value, out var candidateClass))
+                {
+                    error = $"indirect candidate {candidate} has no declared binding class";
+                    return false;
+                }
+                var candidateElement = candidateClass.Resources.ToList().IndexOf(candidate);
+                if (candidateElement < 0)
+                {
+                    error = $"indirect candidate {candidate} is not an element of {candidateKind.Value}";
                     return false;
                 }
 
-                var candidates = info.Images[(int)imageInfo.IndirectRoot].IndirectResources;
-                var candidateElements = new List<(uint Resource, uint Element)>();
-                foreach (var candidate in candidates)
-                {
-                    if (candidate >= info.Images.Count)
-                    {
-                        error = $"indirect candidate {candidate} is outside the image table";
-                        return false;
-                    }
-                    var candidateKind = ImageDescriptorBinding.ForImage(info.Images[(int)candidate]);
-                    if (candidateKind is null || !_imageClasses.TryGetValue(candidateKind.Value, out var candidateClass))
-                    {
-                        error = $"indirect candidate {candidate} has no declared binding class";
-                        return false;
-                    }
-                    var candidateElement = candidateClass.Resources.ToList().IndexOf(candidate);
-                    if (candidateElement < 0)
-                    {
-                        error = $"indirect candidate {candidate} is not an element of {candidateKind.Value}";
-                        return false;
-                    }
-
-                    candidateElements.Add((candidate, (uint)candidateElement));
-                }
-
-                selector = SelectIndirectCandidate(imageInfo, keyMemoryIndex, (uint)candidateElements.Count);
-                elements = candidateElements;
-                return true;
+                candidateElements.Add((candidate, (uint)candidateElement));
             }
 
-            return false;
+            selector = SelectIndirectCandidate(imageInfo, keyMemoryIndex, (uint)candidateElements.Count);
+            elements = candidateElements;
+            return true;
+
         }
 
         private bool HasFlattenedTable => _flattenedTable != 0;

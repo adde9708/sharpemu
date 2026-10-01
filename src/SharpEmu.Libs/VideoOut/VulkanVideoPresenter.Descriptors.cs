@@ -115,20 +115,31 @@ internal static unsafe partial class VulkanVideoPresenter
             imageIdentifier = ImageRequestBuilders.ValidateTextureOwner(_imageCache, imageIdentifier, resolution);
             BindImage(imageIdentifier, storage);
             var descriptor = new TextureDescriptorWords(words);
-            if (ShouldTraceTextureBindings())
+            if (!ShouldTraceTextureBindings())
             {
-                var cached = _imageCache.GetImage(imageIdentifier);
-                var description = cached.Description;
-                Console.Error.WriteLine(
-                    $"TextureBinding stage={program.Stage} hash=0x{program.Hash:X16} index={index} " +
-                    $"address=0x{new TextureDescriptorWords(words).BaseAddress:X16} " +
-                    $"descriptor={descriptor.BaseAddress:X16} size={descriptor.Width + 1}x{descriptor.Height + 1} " +
-                    $"format={(uint)descriptor.Format} tile={(uint)descriptor.TileMode} " +
-                    $"image=0x{description.Data.Address:X16} size=0x{description.Data.Size:X} " +
-                    $"extent={description.Extent.Width}x{description.Extent.Height} pitch={description.Pitch} " +
-                    $"guestFormat={(uint)description.GuestFormat} imageTile={(uint)description.TileMode} " +
-                    $"backing={cached.Backing.Extent.Width}x{cached.Backing.Extent.Height} format={cached.Backing.Format}");
+                return new TextureResource
+                {
+                    Address = descriptor.BaseAddress,
+                    ImageIdentifier = imageIdentifier,
+                    Request = request,
+                    Resolution = resolution,
+                    IsStorage = storage,
+                    DestinationSelect = words[3] & 0xFFFu,
+                    Width = descriptor.Width,
+                    Height = descriptor.Height,
+                };
             }
+            var cached = _imageCache.GetImage(imageIdentifier);
+            var description = cached.Description;
+            Console.Error.WriteLine(
+                $"TextureBinding stage={program.Stage} hash=0x{program.Hash:X16} index={index} " +
+                $"address=0x{new TextureDescriptorWords(words).BaseAddress:X16} " +
+                $"descriptor={descriptor.BaseAddress:X16} size={descriptor.Width + 1}x{descriptor.Height + 1} " +
+                $"format={(uint)descriptor.Format} tile={(uint)descriptor.TileMode} " +
+                $"image=0x{description.Data.Address:X16} size=0x{description.Data.Size:X} " +
+                $"extent={description.Extent.Width}x{description.Extent.Height} pitch={description.Pitch} " +
+                $"guestFormat={(uint)description.GuestFormat} imageTile={(uint)description.TileMode} " +
+                $"backing={cached.Backing.Extent.Width}x{cached.Backing.Extent.Height} format={cached.Backing.Format}");
             return new TextureResource
             {
                 Address = descriptor.BaseAddress,
@@ -438,7 +449,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             memoryOffset = (uint)adjustment;
-            if (resource.Formatted && resource.Written)
+            if (resource is { Formatted: true, Written: true })
             {
                 _imageCache.InvalidateMemoryFromGpu(address, size);
             }
@@ -553,10 +564,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 if (IsStaleImage(binding.ImageIdentifier, out var stale))
                 {
-                    if (stale is not null)
-                    {
-                        stale.Binding = default;
-                    }
+                    stale?.Binding = default;
 
                     images[index] = binding = ResolveImageBinding(info.Images[index], snapshot.Images[index], program, index);
                 }
@@ -731,7 +739,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     RecordStageTextureTransitions(stage.Textures);
                     foreach (var texture in stage.Textures)
                     {
-                        if (texture.IsHostMovie && texture.NeedsUpload)
+                        if (texture is { IsHostMovie: true, NeedsUpload: true })
                         {
                             EndRendering();
                             break;

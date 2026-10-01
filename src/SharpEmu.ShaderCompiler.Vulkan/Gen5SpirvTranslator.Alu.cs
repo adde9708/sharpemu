@@ -1567,8 +1567,7 @@ public static partial class Gen5SpirvTranslator
                     LoadV(destination));
             }
 
-            if (instruction.Control is Gen5SdwaControl destinationControl &&
-                destinationControl.ScalarDestination is null)
+            if (instruction.Control is Gen5SdwaControl { ScalarDestination: null } destinationControl)
             {
                 result = ApplySdwaDestination(
                     destinationControl,
@@ -3951,14 +3950,7 @@ public static partial class Gen5SpirvTranslator
 
             var targetLane = IAdd(BitwiseAnd(lane, UInt(0xFFFF_FFF8)), selector);
             // Ensure target lane is properly constrained to wave size (32 or 64)
-            if (_waveLaneCount == 64)
-            {
-                targetLane = BitwiseAnd(targetLane, UInt(63));
-            }
-            else
-            {
-                targetLane = BitwiseAnd(targetLane, UInt(31));
-            }
+            targetLane = BitwiseAnd(targetLane, _waveLaneCount == 64 ? UInt(63) : UInt(31));
             var shuffled = ShuffleLane(value, targetLane);
             if (control.FetchInactive)
             {
@@ -4089,88 +4081,87 @@ public static partial class Gen5SpirvTranslator
             var dpp = control.Control;
             inRange = _module.ConstantBool(true);
 
-            if (dpp <= 0xFF)
+            switch (dpp)
             {
-                var quadLane = BitwiseAnd(lane, UInt(3));
-                var selected = UInt(dpp & 3);
-                for (var index = 1u; index < 4; index++)
+                case <= 0xFF:
                 {
-                    selected = _module.AddInstruction(
-                        SpirvOp.Select,
-                        _uintType,
-                        _module.AddInstruction(
-                            SpirvOp.IEqual,
-                            _boolType,
-                            quadLane,
-                            UInt(index)),
-                        UInt((dpp >> checked((int)(index * 2))) & 3),
-                        selected);
-                }
-
-                targetLane = IAdd(BitwiseAnd(lane, UInt(0xFFFF_FFFC)), selected);
-                return;
-            }
-
-            if (dpp is >= 0x101 and <= 0x10F)
-            {
-                var shift = UInt(dpp & 15);
-                var shifted = IAdd(rowLane, shift);
-                inRange = _module.AddInstruction(
-                    SpirvOp.ULessThan,
-                    _boolType,
-                    shifted,
-                    UInt(16));
-                targetLane = IAdd(rowBase, BitwiseAnd(shifted, UInt(15)));
-                return;
-            }
-
-            if (dpp is >= 0x111 and <= 0x11F)
-            {
-                var shift = UInt(dpp & 15);
-                inRange = _module.AddInstruction(
-                    SpirvOp.UGreaterThanEqual,
-                    _boolType,
-                    rowLane,
-                    shift);
-                targetLane = IAdd(
-                    rowBase,
-                    BitwiseAnd(
-                        _module.AddInstruction(SpirvOp.ISub, _uintType, rowLane, shift),
-                        UInt(15)));
-                return;
-            }
-
-            if (dpp is >= 0x121 and <= 0x12F)
-            {
-                targetLane = IAdd(
-                    rowBase,
-                    BitwiseAnd(
-                        _module.AddInstruction(
-                            SpirvOp.ISub,
+                    var quadLane = BitwiseAnd(lane, UInt(3));
+                    var selected = UInt(dpp & 3);
+                    for (var index = 1u; index < 4; index++)
+                    {
+                        selected = _module.AddInstruction(
+                            SpirvOp.Select,
                             _uintType,
-                            rowLane,
-                            UInt(dpp & 15)),
-                        UInt(15)));
-                return;
-            }
+                            _module.AddInstruction(
+                                SpirvOp.IEqual,
+                                _boolType,
+                                quadLane,
+                                UInt(index)),
+                            UInt((dpp >> checked((int)(index * 2))) & 3),
+                            selected);
+                    }
 
-            targetLane = dpp switch
-            {
-                0x140 => IAdd(rowBase, _module.AddInstruction(
-                    SpirvOp.ISub, _uintType, UInt(15), rowLane)),
-                0x141 => IAdd(
-                    BitwiseAnd(lane, UInt(0xFFFF_FFF8)),
-                    _module.AddInstruction(
-                        SpirvOp.ISub,
-                        _uintType,
-                        UInt(7),
-                        BitwiseAnd(lane, UInt(7)))),
-                >= 0x150 and <= 0x15F => IAdd(rowBase, UInt(dpp & 15)),
-                >= 0x160 and <= 0x16F => IAdd(
-                    rowBase,
-                    BitwiseXor(rowLane, UInt(dpp & 15))),
-                _ => lane,
-            };
+                    targetLane = IAdd(BitwiseAnd(lane, UInt(0xFFFF_FFFC)), selected);
+                    return;
+                }
+                case >= 0x101 and <= 0x10F:
+                {
+                    var shift = UInt(dpp & 15);
+                    var shifted = IAdd(rowLane, shift);
+                    inRange = _module.AddInstruction(
+                        SpirvOp.ULessThan,
+                        _boolType,
+                        shifted,
+                        UInt(16));
+                    targetLane = IAdd(rowBase, BitwiseAnd(shifted, UInt(15)));
+                    return;
+                }
+                case >= 0x111 and <= 0x11F:
+                {
+                    var shift = UInt(dpp & 15);
+                    inRange = _module.AddInstruction(
+                        SpirvOp.UGreaterThanEqual,
+                        _boolType,
+                        rowLane,
+                        shift);
+                    targetLane = IAdd(
+                        rowBase,
+                        BitwiseAnd(
+                            _module.AddInstruction(SpirvOp.ISub, _uintType, rowLane, shift),
+                            UInt(15)));
+                    return;
+                }
+                case >= 0x121 and <= 0x12F:
+                    targetLane = IAdd(
+                        rowBase,
+                        BitwiseAnd(
+                            _module.AddInstruction(
+                                SpirvOp.ISub,
+                                _uintType,
+                                rowLane,
+                                UInt(dpp & 15)),
+                            UInt(15)));
+                    return;
+                default:
+                    targetLane = dpp switch
+                    {
+                        0x140 => IAdd(rowBase, _module.AddInstruction(
+                            SpirvOp.ISub, _uintType, UInt(15), rowLane)),
+                        0x141 => IAdd(
+                            BitwiseAnd(lane, UInt(0xFFFF_FFF8)),
+                            _module.AddInstruction(
+                                SpirvOp.ISub,
+                                _uintType,
+                                UInt(7),
+                                BitwiseAnd(lane, UInt(7)))),
+                        >= 0x150 and <= 0x15F => IAdd(rowBase, UInt(dpp & 15)),
+                        >= 0x160 and <= 0x16F => IAdd(
+                            rowBase,
+                            BitwiseXor(rowLane, UInt(dpp & 15))),
+                        _ => lane,
+                    };
+                    break;
+            }
         }
 
         private uint IsDppWriteEnabled(Gen5DppControl control)
@@ -4216,34 +4207,38 @@ public static partial class Gen5SpirvTranslator
         {
             var operand = instruction.Sources[sourceIndex];
             uint value;
-            if (operand.Kind == Gen5OperandKind.EncodedConstant &&
-                operand.Value is >= 128 and <= 192)
+            if (operand is { Kind: Gen5OperandKind.EncodedConstant, Value: >= 128 and <= 192 })
             {
                 value = Float(operand.Value - 128);
             }
-            else if (operand.Kind == Gen5OperandKind.EncodedConstant &&
-                     operand.Value is >= 193 and <= 208)
+            else switch (operand.Kind)
             {
-                value = Float(-(operand.Value - 192));
-            }
-            else if (operand.Kind == Gen5OperandKind.EncodedConstant &&
-                     Gen5InlineConstants.TryDecode(operand.Value, out var inline))
-            {
-                value = Bitcast(_floatType, UInt(inline));
-            }
-            else
-            {
-                var raw = GetRawSource(
-                    instruction,
-                    sourceIndex,
-                    applySdwaIntegerModifiers: false);
-                if (instruction.Control is Gen5Vop3Control control &&
-                    (control.OperandSelect & (1u << sourceIndex)) != 0)
+                case Gen5OperandKind.EncodedConstant when
+                    operand.Value is >= 193 and <= 208:
+                    value = Float(-(operand.Value - 192));
+                    break;
+                case Gen5OperandKind.EncodedConstant when
+                    Gen5InlineConstants.TryDecode(operand.Value, out var inline):
+                    value = Bitcast(_floatType, UInt(inline));
+                    break;
+                case Gen5OperandKind.ScalarRegister:
+                case Gen5OperandKind.VectorRegister:
+                case Gen5OperandKind.LiteralConstant:
+                default:
                 {
-                    raw = ShiftRightLogical(raw, UInt(16));
-                }
+                    var raw = GetRawSource(
+                        instruction,
+                        sourceIndex,
+                        applySdwaIntegerModifiers: false);
+                    if (instruction.Control is Gen5Vop3Control control &&
+                        (control.OperandSelect & (1u << sourceIndex)) != 0)
+                    {
+                        raw = ShiftRightLogical(raw, UInt(16));
+                    }
 
-                value = Bitcast(_floatType, EmitHalfToFloat(raw));
+                    value = Bitcast(_floatType, EmitHalfToFloat(raw));
+                    break;
+                }
             }
 
             uint absoluteMask = 0;
@@ -4279,26 +4274,13 @@ public static partial class Gen5SpirvTranslator
             int sourceIndex)
         {
             var operand = instruction.Sources[sourceIndex];
-            uint value;
-            if (operand.Kind == Gen5OperandKind.EncodedConstant &&
-                operand.Value is >= 128 and <= 192)
+            var value = operand.Kind switch
             {
-                value = Float(operand.Value - 128);
-            }
-            else if (operand.Kind == Gen5OperandKind.EncodedConstant &&
-                     operand.Value is >= 193 and <= 208)
-            {
-                value = Float(-(operand.Value - 192));
-            }
-            else
-            {
-                value = Bitcast(
-                    _floatType,
-                    GetRawSource(
-                        instruction,
-                        sourceIndex,
-                        applySdwaIntegerModifiers: false));
-            }
+                Gen5OperandKind.EncodedConstant when operand.Value is >= 128 and <= 192 => Float(operand.Value - 128),
+                Gen5OperandKind.EncodedConstant when operand.Value is >= 193 and <= 208 =>
+                    Float(-(operand.Value - 192)),
+                _ => Bitcast(_floatType, GetRawSource(instruction, sourceIndex, applySdwaIntegerModifiers: false))
+            };
 
             uint absoluteMask = 0;
             uint negateMask = 0;
@@ -4369,10 +4351,9 @@ public static partial class Gen5SpirvTranslator
 
             // Scalar inline negative constants are signed immediates. B64
             // consumers sign-extend them, so -1 denotes a full 64-bit mask.
-            if (operand.Kind == Gen5OperandKind.EncodedConstant &&
-                operand.Value is >= 193 and <= 208)
+            if (operand is { Kind: Gen5OperandKind.EncodedConstant, Value: >= 193 and <= 208 })
             {
-                var signed = -(long)(operand.Value - 192);
+                var signed = -(operand.Value - 192);
                 return _module.Constant64(_ulongType, unchecked((ulong)signed));
             }
 
@@ -4586,22 +4567,13 @@ public static partial class Gen5SpirvTranslator
         {
             var left = GetRawSource(instruction, reverse ? 1 : 0);
             var right = GetRawSource(instruction, reverse ? 0 : 1);
-            if (operation == SpirvOp.ShiftLeftLogical)
+            return operation switch
             {
-                return ShiftLeftLogical(left, right);
-            }
-
-            if (operation == SpirvOp.ShiftRightLogical)
-            {
-                return ShiftRightLogical(left, right);
-            }
-
-            if (operation == SpirvOp.ShiftRightArithmetic)
-            {
-                return ShiftRightArithmetic(left, right);
-            }
-
-            return _module.AddInstruction(operation, _uintType, left, right);
+                SpirvOp.ShiftLeftLogical => ShiftLeftLogical(left, right),
+                SpirvOp.ShiftRightLogical => ShiftRightLogical(left, right),
+                SpirvOp.ShiftRightArithmetic => ShiftRightArithmetic(left, right),
+                _ => _module.AddInstruction(operation, _uintType, left, right)
+            };
         }
 
         private uint EmitInteger16Binary(

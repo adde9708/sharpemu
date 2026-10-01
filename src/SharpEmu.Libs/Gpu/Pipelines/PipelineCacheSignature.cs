@@ -67,7 +67,7 @@ public static class PipelineCacheSignature
             if (expectedParts.Length != actualParts.Length ||
                 expectedParts.Length < 6 ||
                 !string.Equals(expectedParts[0], actualParts[0], StringComparison.Ordinal) ||
-                !expectedParts[2..].SequenceEqual(actualParts[2..], StringComparer.Ordinal))
+                !expectedParts.AsSpan()[2..].SequenceEqual(actualParts.AsSpan()[2..], StringComparer.Ordinal))
             {
                 return false;
             }

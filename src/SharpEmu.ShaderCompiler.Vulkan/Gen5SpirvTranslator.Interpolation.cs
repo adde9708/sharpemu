@@ -24,8 +24,7 @@ public static partial class Gen5SpirvTranslator
         {
             foreach (var instruction in _request.Program.Instructions)
             {
-                if (instruction.Opcode == "VInterpMovF32" &&
-                    instruction.Control is Gen5InterpolationControl interpolation)
+                if (instruction is { Opcode: "VInterpMovF32", Control: Gen5InterpolationControl interpolation })
                 {
                     _perVertexAttributes.Add(interpolation.Attribute);
                 }
@@ -89,15 +88,16 @@ public static partial class Gen5SpirvTranslator
                 _barycentricInputs.Add(bit, variable);
             }
 
-            if ((enabledInputs & 0x11u) != 0)
+            if ((enabledInputs & 0x11u) == 0)
             {
-                _module.AddCapability(SpirvCapability.SampleRateShading);
-                _interpolationSampleId = _module.AddGlobalVariable(
-                    _module.TypePointer(SpirvStorageClass.Input, _intType), SpirvStorageClass.Input);
-                _module.AddDecoration(_interpolationSampleId, SpirvDecoration.BuiltIn, (uint)SpirvBuiltIn.SampleId);
-                _module.AddDecoration(_interpolationSampleId, SpirvDecoration.Flat);
-                _interfaces.Add(_interpolationSampleId);
+                return;
             }
+            _module.AddCapability(SpirvCapability.SampleRateShading);
+            _interpolationSampleId = _module.AddGlobalVariable(
+                _module.TypePointer(SpirvStorageClass.Input, _intType), SpirvStorageClass.Input);
+            _module.AddDecoration(_interpolationSampleId, SpirvDecoration.BuiltIn, (uint)SpirvBuiltIn.SampleId);
+            _module.AddDecoration(_interpolationSampleId, SpirvDecoration.Flat);
+            _interfaces.Add(_interpolationSampleId);
         }
 
         // The perspective barycentrics a smooth slot sharing a per-vertex input is rebuilt with.
@@ -184,29 +184,32 @@ public static partial class Gen5SpirvTranslator
             }
 
             uint result;
-            if (instruction.Opcode == "VInterpMovF32")
+            switch (instruction.Opcode)
             {
-                var mode = instruction.Words[0] & 0xFFu;
-                if (mode >= 3)
+                case "VInterpMovF32":
                 {
-                    error = "reserved interpolation parameter selector";
-                    return false;
+                    var mode = instruction.Words[0] & 0xFFu;
+                    if (mode >= 3)
+                    {
+                        error = "reserved interpolation parameter selector";
+                        return false;
+                    }
+                    result = LoadParameter(mode);
+                    break;
                 }
-                result = LoadParameter(mode);
-            }
-            else if (instruction.Opcode is "VInterpP1F32" or "VInterpP2F32")
-            {
-                var firstPhase = instruction.Opcode == "VInterpP1F32";
-                var source = Bitcast(_floatType, GetRawSource(instruction, 0));
-                var product = _module.AddInstruction(SpirvOp.FMul, _floatType,
-                    LoadParameter(firstPhase ? 0u : 1u), source);
-                result = _module.AddInstruction(SpirvOp.FAdd, _floatType, product,
-                    firstPhase ? LoadParameter(2) : Bitcast(_floatType, LoadV(destination)));
-            }
-            else
-            {
-                error = $"unsupported interpolation opcode {instruction.Opcode}";
-                return false;
+                case "VInterpP1F32" or "VInterpP2F32":
+                {
+                    var firstPhase = instruction.Opcode == "VInterpP1F32";
+                    var source = Bitcast(_floatType, GetRawSource(instruction, 0));
+                    var product = _module.AddInstruction(SpirvOp.FMul, _floatType,
+                        LoadParameter(firstPhase ? 0u : 1u), source);
+                    result = _module.AddInstruction(SpirvOp.FAdd, _floatType, product,
+                        firstPhase ? LoadParameter(2) : Bitcast(_floatType, LoadV(destination)));
+                    break;
+                }
+                default:
+                    error = $"unsupported interpolation opcode {instruction.Opcode}";
+                    return false;
             }
 
             StoreV(destination, Bitcast(_uintType, result));

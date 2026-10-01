@@ -148,7 +148,7 @@ public static class GuestGpuMemoryHook
         }
 
         summary = GetSummary();
-        SharpEmu.HLE.GuestMemory.GuestMemoryProfile.WriteReport();
+        GuestMemory.GuestMemoryProfile.WriteReport();
         return true;
     }
 

@@ -53,12 +53,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             count = registers.Count;
         }
 
-        if (count > UserScalarRegisters.Capacity)
-        {
-            throw SubmissionScheduler.Fatal($"The shader declares more user registers than the bank holds: label={label} shader=0x{shaderAddress:X16} count={count}.");
-        }
-
-        return registers.Values.AsSpan(0, (int)count).ToArray();
+        return count > UserScalarRegisters.Capacity ? throw SubmissionScheduler.Fatal($"The shader declares more user registers than the bank holds: label={label} shader=0x{shaderAddress:X16} count={count}.") : registers.Values.AsSpan(0, (int)count).ToArray();
     }
 
     private ShaderSource PrepareSource(ulong codeAddress, ShaderStage stage, string label, UserScalarRegisters registers, uint declaredCount, bool probeWrittenRegisters, uint userDataBase)
@@ -149,13 +144,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         vertexInfo.Stage = vertexStage;
-        if (pixelInfo is not null)
-        {
-            pixelInfo.Stage = pixelStage;
-        }
+        pixelInfo?.Stage = pixelStage;
 
         SolidColorClear? solidClear = null;
         var disableBlending = false;
+        // A draw with no pixel stage has nothing to detect a clear pair or premultiplied
+        // blend from, so the shared result below is returned without running either probe.
         if (pixelInfo is not null)
         {
             var vertexProgramWords = _programs.Decode(vertexSource);
@@ -188,19 +182,22 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VertexInputResolution);
         var clipSpace = default(ClipSpaceTransform);
-        if (context.Clip.ClipDisable)
+        if (!context.Clip.ClipDisable)
         {
-            ref readonly var viewport = ref context.ScreenViewport.Viewports[0];
-            var limits = _host.Limits;
-            clipSpace = new ClipSpaceTransform(
-                true,
-                viewport.XScale,
-                viewport.YScale,
-                viewport.XOffset,
-                viewport.YOffset,
-                Math.Min(limits.MaxViewportWidth, MaxViewportDimension) * 0.5f,
-                Math.Min(limits.MaxViewportHeight, MaxViewportDimension) * 0.5f);
+            return VertexInputResolver.ResolveVertexInputs(_context, source.Registered, source.UserData,
+                shaderInterface.VertexOutputControl, clipSpace);
         }
+
+        ref readonly var viewport = ref context.ScreenViewport.Viewports[0];
+        var limits = _host.Limits;
+        clipSpace = new ClipSpaceTransform(
+            true,
+            viewport.XScale,
+            viewport.YScale,
+            viewport.XOffset,
+            viewport.YOffset,
+            Math.Min(limits.MaxViewportWidth, MaxViewportDimension) * 0.5f,
+            Math.Min(limits.MaxViewportHeight, MaxViewportDimension) * 0.5f);
 
         return VertexInputResolver.ResolveVertexInputs(_context, source.Registered, source.UserData,
             shaderInterface.VertexOutputControl, clipSpace);
@@ -326,12 +323,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         if (_programs.TryGetProgram(source, options, _strictShaders, ref pushDataCursor, out program, out stage, out var rejection))
             return true;
 
-        if (_reportedShaderSkips.Add((source.Stage, source.Hash, source.CodeSize)))
+        if (!_reportedShaderSkips.Add((source.Stage, source.Hash, source.CodeSize)))
         {
-            var tag = source.Stage == ShaderStage.Compute ? "COMPUTE_SKIPPED" : "DRAW_SKIPPED";
-            Console.Error.WriteLine($"[GPU][WARN][{tag}] {rejection} " +
-                "The operation was not executed. Images and FPS can be incorrect. Set SHARPEMU_STRICT_COMPUTE=1 to stop on this failure.");
+            return false;
         }
+        var tag = source.Stage == ShaderStage.Compute ? "COMPUTE_SKIPPED" : "DRAW_SKIPPED";
+        Console.Error.WriteLine($"[GPU][WARN][{tag}] {rejection} " +
+                                "The operation was not executed. Images and FPS can be incorrect. Set SHARPEMU_STRICT_COMPUTE=1 to stop on this failure.");
         return false;
     }
 

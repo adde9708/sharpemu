@@ -387,7 +387,7 @@ public static partial class Gen5ShaderTranslator
     [Conditional("DEBUG")]
     private static void ValidateDppControlVectors()
     {
-        if (System.Threading.Interlocked.Exchange(ref _dppVectorsValidated, 1) != 0)
+        if (Interlocked.Exchange(ref _dppVectorsValidated, 1) != 0)
         {
             return;
         }
@@ -484,13 +484,13 @@ public static partial class Gen5ShaderTranslator
         if ((word & 0xFF800000u) == 0xCC000000u)
         {
             encoding = Gen5ShaderEncoding.Vop3p;
-            if (!ctx.TryReadUInt32(baseAddress + pc + sizeof(uint), out var vop3pExtra))
+            if (ctx.TryReadUInt32(baseAddress + pc + sizeof(uint), out var vop3pExtra))
             {
-                error = $"vop3p-extra-read-failed pc=0x{pc:X}";
-                return false;
+                return DecodeVop3p(word, vop3pExtra, out name, out sizeDwords, out error);
             }
+            error = $"vop3p-extra-read-failed pc=0x{pc:X}";
+            return false;
 
-            return DecodeVop3p(word, vop3pExtra, out name, out sizeDwords, out error);
         }
 
         switch (word >> 26)
@@ -504,19 +504,17 @@ public static partial class Gen5ShaderTranslator
             case 0x34:
             case 0x35:
                 encoding = Gen5ShaderEncoding.Vop3;
-                if (!TryReadUInt32(ctx, baseAddress + pc + sizeof(uint), out var vop3Extra))
-                {
-                    error = $"vop3-extra-read-failed pc=0x{pc:X}";
-                    return false;
-                }
+                if (TryReadUInt32(ctx, baseAddress + pc + sizeof(uint), out var vop3Extra))
+                    return DecodeVop3(
+                        word,
+                        vop3Extra,
+                        IsVop3BOpcode((word >> 16) & 0x3FF),
+                        out name,
+                        out sizeDwords,
+                        out error);
+                error = $"vop3-extra-read-failed pc=0x{pc:X}";
+                return false;
 
-                return DecodeVop3(
-                    word,
-                    vop3Extra,
-                    IsVop3BOpcode((word >> 16) & 0x3FF),
-                    out name,
-                    out sizeDwords,
-                    out error);
             case 0x36:
                 encoding = Gen5ShaderEncoding.Ds;
                 return DecodeDs(word, out name, out sizeDwords, out error);
@@ -525,22 +523,22 @@ public static partial class Gen5ShaderTranslator
                 return DecodeFlat(word, out name, out sizeDwords, out error);
             case 0x38:
                 encoding = Gen5ShaderEncoding.Mubuf;
-                if (!TryReadUInt32(ctx, baseAddress + pc + sizeof(uint), out var mubufExtra))
+                if (TryReadUInt32(ctx, baseAddress + pc + sizeof(uint), out var mubufExtra))
                 {
-                    error = $"mubuf-extra-read-failed pc=0x{pc:X}";
-                    return false;
+                    return DecodeMubuf(word, mubufExtra, out name, out sizeDwords, out error);
                 }
+                error = $"mubuf-extra-read-failed pc=0x{pc:X}";
+                return false;
 
-                return DecodeMubuf(word, mubufExtra, out name, out sizeDwords, out error);
             case 0x3A:
                 encoding = Gen5ShaderEncoding.Mtbuf;
-                if (!TryReadUInt32(ctx, baseAddress + pc + sizeof(uint), out var mtbufExtra))
+                if (TryReadUInt32(ctx, baseAddress + pc + sizeof(uint), out var mtbufExtra))
                 {
-                    error = $"mtbuf-extra-read-failed pc=0x{pc:X}";
-                    return false;
+                    return DecodeMtbuf(word, mtbufExtra, out name, out sizeDwords, out error);
                 }
+                error = $"mtbuf-extra-read-failed pc=0x{pc:X}";
+                return false;
 
-                return DecodeMtbuf(word, mtbufExtra, out name, out sizeDwords, out error);
             case 0x3C:
                 encoding = Gen5ShaderEncoding.Mimg;
                 return DecodeMimg(word, out name, out sizeDwords, out error);
@@ -895,14 +893,12 @@ public static partial class Gen5ShaderTranslator
     private static bool DecodeVop2(uint word, out string name, out uint sizeDwords, out string error)
     {
         var opcode = (word >> 25) & 0x3F;
-        if (opcode == 0x3E)
+        switch (opcode)
         {
-            return DecodeVopc(word, out name, out sizeDwords, out error);
-        }
-
-        if (opcode == 0x3F)
-        {
-            return DecodeVop1(word, out name, out sizeDwords, out error);
+            case 0x3E:
+                return DecodeVopc(word, out name, out sizeDwords, out error);
+            case 0x3F:
+                return DecodeVop1(word, out name, out sizeDwords, out error);
         }
 
         var src0 = word & 0x1FF;
@@ -1855,12 +1851,7 @@ public static partial class Gen5ShaderTranslator
             return "valu";
         }
 
-        if (name.StartsWith('S'))
-        {
-            return "salu";
-        }
-
-        return "other";
+        return name.StartsWith('S') ? "salu" : "other";
     }
 
     private static bool IsMimgInstruction(string name) =>
@@ -2069,25 +2060,28 @@ public static partial class Gen5ShaderTranslator
                 break;
             case Gen5ShaderEncoding.Sopk:
                 sources = [new Gen5Operand(Gen5OperandKind.EncodedConstant, word & 0xFFFF)];
-                if (opcode == "SWaitcnt")
+                switch (opcode)
                 {
-                    var scalarSource = (word >> 16) & 0x7F;
-                    if (scalarSource != 125)
+                    case "SWaitcnt":
                     {
-                        sources = [.. sources, Gen5Operand.Scalar(scalarSource)];
+                        var scalarSource = (word >> 16) & 0x7F;
+                        if (scalarSource != 125)
+                        {
+                            sources = [.. sources, Gen5Operand.Scalar(scalarSource)];
+                        }
+
+                        break;
                     }
-                }
-                else if (opcode == "SSetregB32")
-                {
-                    sources =
-                    [
-                        Gen5Operand.Scalar((word >> 16) & 0x7F),
-                        new Gen5Operand(Gen5OperandKind.EncodedConstant, word & 0xFFFF),
-                    ];
-                }
-                else
-                {
-                    destinations = [Gen5Operand.Scalar((word >> 16) & 0x7F)];
+                    case "SSetregB32":
+                        sources =
+                        [
+                            Gen5Operand.Scalar((word >> 16) & 0x7F),
+                            new Gen5Operand(Gen5OperandKind.EncodedConstant, word & 0xFFFF),
+                        ];
+                        break;
+                    default:
+                        destinations = [Gen5Operand.Scalar((word >> 16) & 0x7F)];
+                        break;
                 }
                 break;
             case Gen5ShaderEncoding.Smrd:
@@ -2283,22 +2277,23 @@ public static partial class Gen5ShaderTranslator
                         Gen5Operand.Source(word & 0x1FF, literal),
                         Gen5Operand.Vector((word >> 9) & 0xFF),
                     ];
-                    if ((opcode is "VMadMkF32" or "VFmaMkF32" or "VFmaMkF16") && literal.HasValue)
+                    switch (opcode)
                     {
-                        sources =
-                        [
-                            sources[0],
-                            new Gen5Operand(Gen5OperandKind.LiteralConstant, literal.Value),
-                            sources[1],
-                        ];
-                    }
-                    else if ((opcode is "VMadAkF32" or "VFmaAkF32" or "VFmaAkF16") && literal.HasValue)
-                    {
-                        sources =
-                        [
-                            .. sources,
-                            new Gen5Operand(Gen5OperandKind.LiteralConstant, literal.Value),
-                        ];
+                        case "VMadMkF32" or "VFmaMkF32" or "VFmaMkF16" when literal.HasValue:
+                            sources =
+                            [
+                                sources[0],
+                                new Gen5Operand(Gen5OperandKind.LiteralConstant, literal.Value),
+                                sources[1],
+                            ];
+                            break;
+                        case "VMadAkF32" or "VFmaAkF32" or "VFmaAkF16" when literal.HasValue:
+                            sources =
+                            [
+                                .. sources,
+                                new Gen5Operand(Gen5OperandKind.LiteralConstant, literal.Value),
+                            ];
+                            break;
                     }
                 }
 
@@ -2991,39 +2986,36 @@ public static partial class Gen5ShaderTranslator
 
         private static string? DescribeInstruction(Gen5ShaderInstruction instruction)
         {
-            if (instruction.Control is Gen5ImageControl image)
+            switch (instruction.Control)
             {
-                var addressRegisters = string.Join(
-                    '/',
-                    image.AddressRegisters.Select(register => $"v{register}"));
-                return
-                    $"{instruction.Opcode}@0x{instruction.Pc:X}:dm=0x{image.Dmask:X}," +
-                    $"va={addressRegisters},vd=v{image.VectorData}," +
-                    $"sr=s{image.ScalarResource},ss=s{image.ScalarSampler}," +
-                    $"dim={image.Dimension},da={(image.IsArray ? 1 : 0)}," +
-                    $"a16={(image.A16 ? 1 : 0)},d16={(image.D16 ? 1 : 0)}," +
-                    $"glc={(image.Glc ? 1 : 0)}," +
-                    $"slc={(image.Slc ? 1 : 0)}";
+                case Gen5ImageControl image:
+                {
+                    var addressRegisters = string.Join(
+                        '/',
+                        image.AddressRegisters.Select(register => $"v{register}"));
+                    return
+                        $"{instruction.Opcode}@0x{instruction.Pc:X}:dm=0x{image.Dmask:X}," +
+                        $"va={addressRegisters},vd=v{image.VectorData}," +
+                        $"sr=s{image.ScalarResource},ss=s{image.ScalarSampler}," +
+                        $"dim={image.Dimension},da={(image.IsArray ? 1 : 0)}," +
+                        $"a16={(image.A16 ? 1 : 0)},d16={(image.D16 ? 1 : 0)}," +
+                        $"glc={(image.Glc ? 1 : 0)}," +
+                        $"slc={(image.Slc ? 1 : 0)}";
+                }
+                case Gen5ExportControl export:
+                    return
+                        $"Exp@0x{instruction.Pc:X}:target=0x{export.Target:X}," +
+                        $"en=0x{export.EnableMask:X},compr={(export.Compressed ? 1 : 0)}," +
+                        $"done={(export.Done ? 1 : 0)},vm={(export.ValidMask ? 1 : 0)}," +
+                        $"src={string.Join('/', instruction.Sources)}";
+                case Gen5InterpolationControl interpolation:
+                    return
+                        $"{instruction.Opcode}@0x{instruction.Pc:X}:" +
+                        $"attr={interpolation.Attribute},chan={interpolation.Channel}," +
+                        $"src={instruction.Sources[0]},dst={instruction.Destinations[0]}";
+                default:
+                    return null;
             }
-
-            if (instruction.Control is Gen5ExportControl export)
-            {
-                return
-                    $"Exp@0x{instruction.Pc:X}:target=0x{export.Target:X}," +
-                    $"en=0x{export.EnableMask:X},compr={(export.Compressed ? 1 : 0)}," +
-                    $"done={(export.Done ? 1 : 0)},vm={(export.ValidMask ? 1 : 0)}," +
-                    $"src={string.Join('/', instruction.Sources)}";
-            }
-
-            if (instruction.Control is Gen5InterpolationControl interpolation)
-            {
-                return
-                    $"{instruction.Opcode}@0x{instruction.Pc:X}:" +
-                    $"attr={interpolation.Attribute},chan={interpolation.Channel}," +
-                    $"src={instruction.Sources[0]},dst={instruction.Destinations[0]}";
-            }
-
-            return null;
         }
 
         private static void AppendCounts(

@@ -88,12 +88,7 @@ public sealed unsafe class DescriptorHeap : IDisposable
             _sets.Add(layout.Handle, batch);
         }
 
-        if (batch.Size != 0)
-        {
-            return batch.Sets[--batch.Size];
-        }
-
-        if (Allocate(layout, in demand, batch))
+        if (batch.Size != 0 || Allocate(layout, in demand, batch))
         {
             return batch.Sets[--batch.Size];
         }
