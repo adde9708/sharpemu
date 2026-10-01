@@ -15,7 +15,7 @@ namespace SharpEmu.Libs.Gpu.Pipelines;
 
 // The pipeline provider behind the executor: programs by identity, pipelines by their full static state.
 internal sealed partial class ShaderPipelineCache(
-    CpuContext context,
+    CpuContext cpuContext,
     IShaderPipelineHost host,
     IGuestGpuBackend compiler,
     ShaderHeaderRegistry registry)
@@ -25,10 +25,7 @@ internal sealed partial class ShaderPipelineCache(
     private const uint MaxPixelInputs = 32;
     private const uint MaxViewportDimension = 16384;
 
-    private readonly CpuContext _context = context;
-    private readonly IShaderPipelineHost _host = host;
-    private readonly ShaderHeaderRegistry _registry = registry;
-    private readonly ShaderProgramCache _programs = new(context, compiler, host);
+    private readonly ShaderProgramCache _programs = new(cpuContext, compiler, host);
     private readonly Dictionary<GraphicsPipelineKey, PipelineHandle> _graphicsPipelines = new();
     private readonly Dictionary<ComputePipelineKey, PipelineHandle> _computePipelines = new();
     private readonly object _gate = new();
@@ -56,8 +53,8 @@ internal sealed partial class ShaderPipelineCache(
     private ShaderSource PrepareSource(ulong codeAddress, ShaderStage stage, string label, UserScalarRegisters registers, uint declaredCount, bool probeWrittenRegisters, uint userDataBase)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramSourceRead);
-        var registered = _registry.Require(codeAddress, label);
-        var hash = ShaderIdentity.Compute(_context.Memory, codeAddress, registered.CodeRanges, label);
+        var registered = registry.Require(codeAddress, label);
+        var hash = ShaderIdentity.Compute(cpuContext.Memory, codeAddress, registered.CodeRanges, label);
         var userData = UserData(registers, declaredCount, probeWrittenRegisters, codeAddress, label);
         return new ShaderSource(registered, hash, userData, userDataBase, stage);
     }
@@ -104,7 +101,7 @@ internal sealed partial class ShaderPipelineCache(
 
             pixelOutputs = ResolveBoundTargets(context, targetExportMapping, depthBound ? pixelProgram.PixelColorExportMasks : null,
                 out var outputModes, out var outputMappings);
-            pixelInfo = PixelStageInputResolver.Resolve(_context, pixelSource.Registered, shaderInterface, outputModes, outputMappings, inputCount);
+            pixelInfo = PixelStageInputResolver.Resolve(cpuContext, pixelSource.Registered, shaderInterface, outputModes, outputMappings, inputCount);
         }
 
         ShaderProgram vertexProgram;
@@ -181,12 +178,12 @@ internal sealed partial class ShaderPipelineCache(
         var clipSpace = default(ClipSpaceTransform);
         if (!context.Clip.ClipDisable)
         {
-            return VertexInputResolver.ResolveVertexInputs(_context, source.Registered, source.UserData,
+            return VertexInputResolver.ResolveVertexInputs(cpuContext, source.Registered, source.UserData,
                 shaderInterface.VertexOutputControl, clipSpace);
         }
 
         ref readonly var viewport = ref context.ScreenViewport.Viewports[0];
-        var limits = _host.Limits;
+        var limits = host.Limits;
         clipSpace = new ClipSpaceTransform(
             true,
             viewport.XScale,
@@ -196,7 +193,7 @@ internal sealed partial class ShaderPipelineCache(
             Math.Min(limits.MaxViewportWidth, MaxViewportDimension) * 0.5f,
             Math.Min(limits.MaxViewportHeight, MaxViewportDimension) * 0.5f);
 
-        return VertexInputResolver.ResolveVertexInputs(_context, source.Registered, source.UserData,
+        return VertexInputResolver.ResolveVertexInputs(cpuContext, source.Registered, source.UserData,
             shaderInterface.VertexOutputControl, clipSpace);
     }
 
@@ -243,7 +240,7 @@ internal sealed partial class ShaderPipelineCache(
             }
 
             var words = context.ColorTargets[slot];
-            if (!_host.TryResolveColorOutput((uint)words.Layout, (uint)words.NumberType, (uint)words.Order, out var kind, out var mapping))
+            if (!host.TryResolveColorOutput((uint)words.Layout, (uint)words.NumberType, (uint)words.Order, out var kind, out var mapping))
             {
                 throw SubmissionScheduler.Fatal($"The color target format has no pixel output kind: slot={slot} layout={(uint)words.Layout} numberType={(uint)words.NumberType} order={(uint)words.Order}.");
             }
@@ -281,7 +278,7 @@ internal sealed partial class ShaderPipelineCache(
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
         var source = PrepareSource(compute.Address, ShaderStage.Compute, "compute", compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, userDataBase: 0);
-        var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ);
+        var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ);
         var systemRegisters = DecodeComputeSystemRegisters(compute);
         var program = _programs.Decode(source);
         if (TrySubmitMaskedDwordCopyKernel(program, source, systemRegisters, input, out var description))
@@ -377,7 +374,7 @@ internal sealed partial class ShaderPipelineCache(
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PipelineCreation);
         var description = BuildGraphicsDescription(
             colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending,
-            vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts);
+            vertexProgram, pixelProgram, host.NoAttachmentSampleCounts);
         var key = KeyOf(description);
         lock (_gate)
         {
@@ -394,7 +391,7 @@ internal sealed partial class ShaderPipelineCache(
 
             }
 
-            var created = _host.CreateGraphicsPipeline(description);
+            var created = host.CreateGraphicsPipeline(description);
             _graphicsPipelines.Add(key, created);
             ShaderCacheCounters.CountGraphicsPipeline();
             return created;
@@ -596,7 +593,7 @@ internal sealed partial class ShaderPipelineCache(
                 RenderTrace.Write($"PipelineCache create compute program=0x{program.Id:X16} hash=0x{stage.Hash:X16}");
             }
 
-            var created = _host.CreateComputePipeline(new ComputePipelineDescription { Input = input, Program = program, Stage = stage });
+            var created = host.CreateComputePipeline(new ComputePipelineDescription { Input = input, Program = program, Stage = stage });
             _computePipelines.Add(key, created);
             ShaderCacheCounters.CountComputePipeline();
             return created;
