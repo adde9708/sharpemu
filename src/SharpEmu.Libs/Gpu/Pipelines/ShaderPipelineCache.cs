@@ -14,29 +14,26 @@ using Silk.NET.Vulkan;
 namespace SharpEmu.Libs.Gpu.Pipelines;
 
 // The pipeline provider behind the executor: programs by identity, pipelines by their full static state.
-internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
+internal sealed partial class ShaderPipelineCache(
+    CpuContext context,
+    IShaderPipelineHost host,
+    IGuestGpuBackend compiler,
+    ShaderHeaderRegistry registry)
+    : IShaderPipelineProvider
 {
     private const uint VertexUserDataBase = 8;
     private const uint MaxPixelInputs = 32;
     private const uint MaxViewportDimension = 16384;
 
-    private readonly CpuContext _context;
-    private readonly IShaderPipelineHost _host;
-    private readonly ShaderHeaderRegistry _registry;
-    private readonly ShaderProgramCache _programs;
+    private readonly CpuContext _context = context;
+    private readonly IShaderPipelineHost _host = host;
+    private readonly ShaderHeaderRegistry _registry = registry;
+    private readonly ShaderProgramCache _programs = new(context, compiler, host);
     private readonly Dictionary<GraphicsPipelineKey, PipelineHandle> _graphicsPipelines = new();
     private readonly Dictionary<ComputePipelineKey, PipelineHandle> _computePipelines = new();
     private readonly object _gate = new();
     private readonly bool _strictShaders = Environment.GetEnvironmentVariable("SHARPEMU_STRICT_COMPUTE") != "0";
     private readonly HashSet<(ShaderStage Stage, ulong Hash, uint CodeSize)> _reportedShaderSkips = [];
-
-    public ShaderPipelineCache(CpuContext context, IShaderPipelineHost host, IGuestGpuBackend compiler, ShaderHeaderRegistry registry)
-    {
-        _context = context;
-        _host = host;
-        _registry = registry;
-        _programs = new ShaderProgramCache(context, compiler, host);
-    }
 
     public ShaderProgramCache Programs => _programs;
 
