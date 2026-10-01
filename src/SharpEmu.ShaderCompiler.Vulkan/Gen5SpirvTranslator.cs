@@ -7781,38 +7781,41 @@ public static partial class Gen5SpirvTranslator
                 }
             }
 
-            var starts = leaders
-                .Where(pc => instructions.Any(instruction => instruction.Pc == pc))
-                .ToArray();
-            var blocks = new List<ShaderBlock>(starts.Length);
-            for (var index = 0; index < starts.Length; index++)
+            // Leaders and instructions are both ascending in Pc, so one merge resolves every
+            // leader to its index and drops the ones that address no instruction. Scanning
+            // per leader instead is quadratic in the program length, which a large shader
+            // near the declared size ceiling turns into a multi-minute translation.
+            var starts = new List<uint>(leaders.Count);
+            var startIndices = new List<int>(leaders.Count);
+            var cursor = 0;
+            foreach (var pc in leaders)
             {
-                var startIndex = FindInstructionIndex(instructions, starts[index]);
-                var endIndex = index + 1 < starts.Length
-                    ? FindInstructionIndex(instructions, starts[index + 1])
+                while (cursor < instructions.Count && instructions[cursor].Pc < pc)
+                {
+                    cursor++;
+                }
+
+                if (cursor < instructions.Count && instructions[cursor].Pc == pc)
+                {
+                    starts.Add(pc);
+                    startIndices.Add(cursor);
+                }
+            }
+
+            var blocks = new List<ShaderBlock>(startIndices.Count);
+            for (var index = 0; index < startIndices.Count; index++)
+            {
+                var startIndex = startIndices[index];
+                var endIndex = index + 1 < startIndices.Count
+                    ? startIndices[index + 1]
                     : instructions.Count;
-                if (startIndex >= 0 && endIndex > startIndex)
+                if (endIndex > startIndex)
                 {
                     blocks.Add(new ShaderBlock(starts[index], startIndex, endIndex));
                 }
             }
 
             return blocks;
-        }
-
-        private static int FindInstructionIndex(
-            IReadOnlyList<Gen5ShaderInstruction> instructions,
-            uint pc)
-        {
-            for (var index = 0; index < instructions.Count; index++)
-            {
-                if (instructions[index].Pc == pc)
-                {
-                    return index;
-                }
-            }
-
-            return -1;
         }
 
         private static bool TryFindBlock(
