@@ -95,6 +95,13 @@ public static class GpuMemoryAccessProfile
 
     internal static Measurement[] Snapshot() => Counters.Snapshot();
 
+    // A report is the only place these are reset, and only between snapshots: a counter that a
+    // call is still accumulating into must not be zeroed underneath it, or the ticks it records
+    // on completion are attributed to the next window. Counters only ever grow, so a window
+    // delta is the difference between two snapshots.
+    private static Measurement[]? _windowBaseline;
+    private static long _windowBaselineTicks;
+
     internal static Operation GetLockOperation(RegionLock.Category category, bool hold)
     {
         var inFault = _faultDepth != 0;
@@ -180,17 +187,40 @@ public static class GpuMemoryAccessProfile
         }, 0, true)
         : default;
 
-    // Nested scopes overlap; these are cumulative inclusive times across all threads.
+    // Nested scopes overlap; these are cumulative inclusive times across all threads. The
+    // window_* fields are the change since the previous report, which is what sizes a cost
+    // against one window: the cumulative totals are since process start and cannot be
+    // compared against a window's duration. A delta that goes negative means a scope was
+    // still open across the boundary, so the line is reported with a -1 window instead.
     public static void WriteReport()
     {
         if (!Enabled) return;
         var snapshot = Counters.Snapshot();
+        var now = Stopwatch.GetTimestamp();
+        var baseline = _windowBaseline;
+        var windowMs = (now - _windowBaselineTicks) * 1000.0 / Stopwatch.Frequency;
+        _windowBaseline = snapshot;
+        _windowBaselineTicks = now;
         for (var index = 0; index < snapshot.Length; index++)
         {
             var value = snapshot[index];
             if (value.Calls == 0) continue;
+            long windowCalls = -1;
+            long windowBytes = -1;
+            var windowInclusiveMs = -1.0;
+            if (baseline is not null)
+            {
+                var previous = baseline[index];
+                if (value.Calls >= previous.Calls && value.Bytes >= previous.Bytes && value.Ticks >= previous.Ticks)
+                {
+                    windowCalls = value.Calls - previous.Calls;
+                    windowBytes = value.Bytes - previous.Bytes;
+                    windowInclusiveMs = (value.Ticks - previous.Ticks) * 1000.0 / Stopwatch.Frequency;
+                }
+            }
+
             Console.Error.WriteLine(FormattableString.Invariant(
-                $"[PERF][GPU_MEMORY_ACCESS] operation={(Operation)index} cumulative=1 calls={value.Calls} inclusive_ms={value.Ticks * 1000.0 / Stopwatch.Frequency:F3} max_ms={value.MaximumTicks * 1000.0 / Stopwatch.Frequency:F3} bytes={value.Bytes}"));
+                $"[PERF][GPU_MEMORY_ACCESS] operation={(Operation)index} cumulative=1 calls={value.Calls} inclusive_ms={value.Ticks * 1000.0 / Stopwatch.Frequency:F3} max_ms={value.MaximumTicks * 1000.0 / Stopwatch.Frequency:F3} bytes={value.Bytes} window_ms={windowMs:F3} window_calls={windowCalls} window_inclusive_ms={windowInclusiveMs:F3} window_bytes={windowBytes}"));
         }
     }
 }
