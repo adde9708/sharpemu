@@ -343,6 +343,9 @@ public sealed class RuntimeValueEvaluator
         using var scratch = RuntimeEvaluationScratch.Rent();
         var cleanEvaluator = new RuntimeValueEvaluator(cleanScratch, plan, inputs.WithReader(inputs.ReadCleanMemory));
         var evaluator = new RuntimeValueEvaluator(scratch, plan, inputs, cleanFlatSlots, cleanEvaluator);
+        // Only plans with conditional descriptor branches reach this, so the profile's
+        // branch_evaluations stays at zero for a title whose plans are all straight-line.
+        // That is a property of the shaders, not a disabled or broken counter.
         if (evaluateTable && plan.ResourceBranches.Count != 0)
             activeSources = EvaluateActiveSources(plan, inputs, cleanEvaluator);
         var evaluated = new List<DescriptorWords>(sources.Count);
