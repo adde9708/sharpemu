@@ -16,12 +16,12 @@ public sealed class GuestMemoryStateCollection
 }
 
 [Collection(GuestMemoryStateCollection.Name)]
-public sealed unsafe class SharedBackingViewsTests
+public sealed class SharedBackingViewsTests
 {
     private static byte[] Pattern(int length, byte value) => Enumerable.Repeat(value, length).ToArray();
 
     [Fact]
-    public void SingleMappingReadsDoNotAllocateTemporarySegments()
+    public unsafe void SingleMappingReadsDoNotAllocateTemporarySegments()
     {
         if (!Supported) return;
         var host = HostViewMemory.Create();
@@ -68,7 +68,7 @@ public sealed unsafe class SharedBackingViewsTests
     }
 
     [Fact]
-    public void CopyInAndOut_ShareBytesWithTheView()
+    public unsafe void CopyInAndOut_ShareBytesWithTheView()
     {
         if (!Supported)
         {
@@ -97,7 +97,7 @@ public sealed unsafe class SharedBackingViewsTests
     }
 
     [Fact]
-    public void TwoViewsOfOneOffset_ShareBytesAndTheSecondSurvives()
+    public unsafe void TwoViewsOfOneOffset_ShareBytesAndTheSecondSurvives()
     {
         if (!Supported)
         {
@@ -134,7 +134,7 @@ public sealed unsafe class SharedBackingViewsTests
     // must stay exact on a stable view and fail or succeed cleanly on a view that is
     // being unmapped and remapped at the same time.
     [Fact]
-    public void LockFreeTransfers_StayConsistentWhileOtherViewsChange()
+    public async Task LockFreeTransfers_StayConsistentWhileOtherViewsChange()
     {
         if (!Supported)
         {
@@ -176,7 +176,7 @@ public sealed unsafe class SharedBackingViewsTests
         }
 
         Volatile.Write(ref stop, 1);
-        Task.WaitAll(workers);
+        await Task.WhenAll(workers);
         Assert.Equal(0, Volatile.Read(ref failures));
 
         Assert.True(store.Unmap(stable, Segment, out _));
@@ -187,7 +187,7 @@ public sealed unsafe class SharedBackingViewsTests
     }
 
     [Fact]
-    public void Transfers_WorkWhileTheViewIsNoAccessOrReadOnly()
+    public unsafe void Transfers_WorkWhileTheViewIsNoAccessOrReadOnly()
     {
         if (!Supported)
         {
@@ -214,7 +214,7 @@ public sealed unsafe class SharedBackingViewsTests
     }
 
     [Fact]
-    public void UnmapThenRemap_KeepsBackingContents()
+    public unsafe void UnmapThenRemap_KeepsBackingContents()
     {
         if (!Supported)
         {
@@ -239,7 +239,7 @@ public sealed unsafe class SharedBackingViewsTests
     }
 
     [Fact]
-    public void PartialUnmap_SplitsTheRecordAndTransfersNeverCopyAcrossTheGap()
+    public unsafe void PartialUnmap_SplitsTheRecordAndTransfersNeverCopyAcrossTheGap()
     {
         if (!Supported)
         {
@@ -310,7 +310,7 @@ public sealed unsafe class SharedBackingViewsTests
     }
 
     [Fact]
-    public void InjectedFailures_RollBackViewsAndRecordsTogether()
+    public unsafe void InjectedFailures_RollBackViewsAndRecordsTogether()
     {
         if (!Supported)
         {

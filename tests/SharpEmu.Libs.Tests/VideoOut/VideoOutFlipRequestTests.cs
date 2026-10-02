@@ -41,6 +41,62 @@ public sealed class VideoOutFlipRequestTests : IDisposable
     }
 
     [Fact]
+    public void ChangeBufferAttribute2UpdatesTheRegisteredGroupAndValidatesArguments()
+    {
+        var manager = new ModuleManager();
+        manager.RegisterExports(SharpEmu.Generated.SysAbiExportRegistry.CreateExports(Generation.Gen5));
+        Assert.True(manager.TryGetExport("HuViW4HnrOw", out var export));
+        Assert.Equal("sceVideoOutSubmitChangeBufferAttribute2", export.Name);
+
+        var ports = (System.Collections.IDictionary)typeof(VideoOutExports)
+            .GetField("_ports", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!.GetValue(null)!;
+        var port = ports[_handle]!;
+        // Seed registration without starting a native presenter in this state test.
+        var groups = (Array)port.GetType().GetProperty("Groups")!.GetValue(port)!;
+        groups.SetValue(Activator.CreateInstance(groups.GetType().GetElementType()!, nonPublic: true), 0);
+        var slots = (Array)port.GetType().GetProperty("BufferSlots")!.GetValue(port)!;
+        var slot = slots.GetValue(0)!;
+        slot.GetType().GetProperty("GroupIndex")!.SetValue(slot, 0);
+        slot.GetType().GetProperty("AddressLeft")!.SetValue(slot, MemoryBase);
+
+        const ulong pqFormat = 0x8100070422000000;
+        var attribute = new byte[0x50];
+        BinaryPrimitives.WriteUInt32LittleEndian(attribute.AsSpan(0x0C), 3840);
+        BinaryPrimitives.WriteUInt32LittleEndian(attribute.AsSpan(0x10), 2160);
+        BinaryPrimitives.WriteUInt64LittleEndian(attribute.AsSpan(0x18), 8);
+        BinaryPrimitives.WriteUInt64LittleEndian(attribute.AsSpan(0x20), pqFormat);
+        Assert.True(_memory.TryWrite(StatusAddress, attribute));
+
+        ulong Change(int setIndex = 0, ulong address = StatusAddress, ulong option = 0, int? handle = null)
+        {
+            _context[CpuRegister.Rdi] = unchecked((ulong)(handle ?? _handle));
+            _context[CpuRegister.Rsi] = unchecked((ulong)setIndex);
+            _context[CpuRegister.Rdx] = address;
+            _context[CpuRegister.Rcx] = option;
+            Assert.True(manager.TryDispatch("HuViW4HnrOw", _context, out _));
+            return _context[CpuRegister.Rax];
+        }
+
+        Assert.Equal(0UL, Change());
+        Assert.True(VideoOutExports.TryGetDisplayBufferInfo(_handle, 0, out var info));
+        Assert.Equal(new VideoOutExports.DisplayBufferInfo(MemoryBase, pqFormat, 0, 3840, 2160, 3840, 8), info);
+        Assert.Equal(3840u, port.GetType().GetProperty("OutputWidth")!.GetValue(port));
+        Assert.Equal(2160u, port.GetType().GetProperty("OutputHeight")!.GetValue(port));
+        Assert.Equal(unchecked((ulong)(int)0x8029000B), Change(handle: -1));
+        Assert.Equal(unchecked((ulong)(int)0x8029001A), Change(address: 0));
+        Assert.Equal(unchecked((ulong)(int)0x8029001A), Change(option: 1));
+        Assert.Equal(unchecked((ulong)(int)0x8029000A), Change(setIndex: -1));
+        Assert.Equal(unchecked((ulong)(int)0x8029000A), Change(setIndex: 4));
+        Assert.Equal(unchecked((ulong)(int)0x8029000A), Change(setIndex: 1));
+        Assert.Equal(unchecked((ulong)(int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT), Change(address: MemoryBase + 0x1000));
+        BinaryPrimitives.WriteUInt32LittleEndian(attribute.AsSpan(0x0C), 0);
+        Assert.True(_memory.TryWrite(StatusAddress, attribute));
+        Assert.Equal(unchecked((ulong)(int)0x80290001), Change());
+        Assert.True(VideoOutExports.TryGetDisplayBufferInfo(_handle, 0, out var afterFailure));
+        Assert.Equal(info, afterFailure);
+    }
+
+    [Fact]
     public void CleanupPreservesAnotherPortsPendingFlip()
     {
         var request = Reserve(42);

@@ -91,7 +91,7 @@
   "Options.Hdr.Desc": "Seçilmiş ekran və qrafik alt sistem dəstəklədikdə HDR istifadə edin. Avtomatik rejimdə dəstək yoxdursa, SDR istifadə olunur.",
   "Options.Hdr.Auto": "Avtomatik",
   "Options.Env.BinkPlayback.Label": "Bink video oynadılması",
-  "Options.Env.BinkPlayback.Desc": "Host Bink videolarını FFmpeg körpüsü vasitəsilə oynadır, lakin bəzi oyunlarda problemlər yarana bilər.\nGuest oyunun öz dekoderindən istifadə edir; SharpEmu hazırda bunu yalnız qismən dəstəkləyir.\nSkip Bink videolarını ötürür və bu, inkişaf prosesini asanlaşdıra bilər.",
+  "Options.Env.BinkPlayback.Desc": "Host Bink videolarını FFmpeg körpüsü vasitəsilə oynadır, lakin bəzi oyunlarda problemlər yarana bilər.\nGuest oyunun öz dekoderindən istifadə edir.\nSkip Bink videolarını ötürür və bu, inkişaf prosesini asanlaşdıra bilər.",
   "Options.Env.BinkPlayback.Host": "Host (FFmpeg)",
   "Options.Env.BinkPlayback.Guest": "Guest",
   "Options.Env.BinkPlayback.Skip": "Skip",

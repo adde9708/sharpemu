@@ -10,11 +10,11 @@ namespace SharpEmu.Libs.Tests.GUI;
 public sealed class OverlaySettingsTests
 {
     [Fact]
-    public void MissingSettingsKeepTheExistingFullTopRightOverlay()
+    public void MissingSettingsUseTitleBarOverlay()
     {
         var settings = GuiSettings.NormalizeFromJson("{}");
         Assert.True(settings.OverlayEnabled);
-        Assert.Equal("Full", settings.OverlayMode);
+        Assert.Equal("TitleBar", settings.OverlayMode);
         Assert.Equal("TopRight", settings.OverlayCorner);
     }
 
@@ -36,7 +36,7 @@ public sealed class OverlaySettingsTests
         var settings = GuiSettings.NormalizeFromJson("""
             {"OverlayMode":null,"OverlayCorner":"somewhere"}
             """);
-        Assert.Equal("Full", settings.OverlayMode);
+        Assert.Equal("TitleBar", settings.OverlayMode);
         Assert.Equal("TopRight", settings.OverlayCorner);
     }
 

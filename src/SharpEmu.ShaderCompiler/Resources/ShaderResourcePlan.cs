@@ -181,7 +181,8 @@ public sealed class ShaderResourcePlan
             var value = TableReads[slot].Value;
             if (value.Kind == ScalarValueKind.ScalarAddressWord && value.Operands.Length != 0 &&
                 value.Operands[0].Kind == ScalarValueKind.AddressHandle &&
-                value.Operands[0].Operands.SequenceEqual(heap.Dwords))
+                value.Operands[0].Operands.Length == heap.Dwords.Length &&
+                value.Operands[0].Operands.Zip(heap.Dwords).All(pair => ReferenceEquals(pair.First, pair.Second) || Graph.Equivalent(pair.First, pair.Second)))
             {
                 slots[slot] = 1;
             }

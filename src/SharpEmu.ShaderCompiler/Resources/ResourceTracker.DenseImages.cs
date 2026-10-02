@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.ShaderCompiler.Ir;
+
 namespace SharpEmu.ShaderCompiler.Resources;
 
 public sealed partial class ResourceTracker
@@ -195,9 +197,11 @@ public sealed partial class ResourceTracker
 
         var instructions = _graph.Program.Instructions;
         var firstLaneIndex = FindInstructionIndex(instructions, (uint)key.Payload);
-        if (firstLaneIndex < 0 || instructions[firstLaneIndex] is not { Opcode: "VReadfirstlaneB32", Sources.Count: 1, Destinations.Count: 1 } firstLane ||
+        if (firstLaneIndex < 0 || instructions[firstLaneIndex] is not { Destinations.Count: 1 } firstLane ||
+            firstLane.Sources.Count == 0 ||
             firstLane.Sources[0] is not { Kind: Gen5OperandKind.VectorRegister } vectorSource ||
-            firstLane.Destinations[0] is not { Kind: Gen5OperandKind.ScalarRegister } scalarDestination)
+            firstLane.Destinations[0] is not { Kind: Gen5OperandKind.ScalarRegister } ||
+            !(firstLane is { Opcode: "VReadfirstlaneB32", Sources.Count: 1 } || ReadsActiveLane(instructions, firstLaneIndex)))
         {
             return null;
         }
@@ -222,12 +226,8 @@ public sealed partial class ResourceTracker
         var descriptorLoadIndex = FindInstructionIndex(instructions, _plan.Memory[descriptorMemoryIndex].Pc);
         if (descriptorLoadIndex < 0 || instructions[descriptorLoadIndex] is not
             {
-                Control: Gen5ScalarMemoryControl
-            {
-                DestinationCount: >= 8,
-                DynamicOffsetRegister: { } dynamicOffsetRegister,
-            },
-            } descriptorLoad || dynamicOffsetRegister != scalarDestination.Value ||
+                Control: Gen5ScalarMemoryControl { DynamicOffsetRegister: not null },
+            } descriptorLoad ||
             descriptorLoad.Sources.Count == 0 || descriptorLoad.Sources[0] != Gen5Operand.Scalar(global.ScalarAddress))
         {
             return null;
@@ -244,8 +244,7 @@ public sealed partial class ResourceTracker
         if (TryGetSelfAddedConstant(instructions[addressDefinitionIndex], address, out _) &&
             TryGetWaveIndexedStride(instructions, addressDefinitionIndex, address, heapAddress,
                 out var maskRegister, out var bitRegister, out var maskOffset, out var indexStride) &&
-            indexDataOffset != 0 && indexStride != 0 && instructions.Any(instruction => instruction.Opcode == "SBitset0B32" &&
-                instruction.Destinations.Contains(maskRegister) && instruction.Sources.Contains(bitRegister)))
+            indexDataOffset != 0 && indexStride != 0 && ClearsMaskBit(instructions, 0, instructions.Count, maskRegister, bitRegister))
         {
             return new(maskOffset, indexDataOffset, indexStride);
         }
@@ -283,9 +282,7 @@ public sealed partial class ResourceTracker
             {
                 if (instructions[scanIndex] is not { Opcode: "SFF1I32B32", Sources.Count: 1, Destinations.Count: 1 } scan ||
                     scan.Sources[0] != maskRegister || scan.Destinations[0] is not { Kind: Gen5OperandKind.ScalarRegister } bitRegister ||
-                    !instructions.Skip(scanIndex + 1).Take(before - scanIndex - 1)
-                        .Any(instruction => instruction.Opcode == "SBitset0B32" && instruction.Destinations.Contains(maskRegister) &&
-                            instruction.Sources.Contains(bitRegister)))
+                    !ClearsMaskBit(instructions, scanIndex + 1, before, maskRegister, bitRegister))
                     continue;
 
                 for (var multiplyIndex = scanIndex + 1; multiplyIndex < before; multiplyIndex++)
@@ -356,6 +353,130 @@ public sealed partial class ResourceTracker
         maskOffset = (uint)maskControl.ImmediateOffsetBytes;
         stride = (uint)combinedStride;
         return true;
+    }
+
+    private static bool ClearsMaskBit(
+        IReadOnlyList<Gen5ShaderInstruction> instructions,
+        int start,
+        int end,
+        Gen5Operand mask,
+        Gen5Operand bit)
+    {
+        end = Math.Min(end, instructions.Count);
+        for (var index = Math.Max(0, start); index < end; index++)
+        {
+            var instruction = instructions[index];
+            if (instruction.Opcode == "SBitset0B32" && instruction.Destinations.Contains(mask) && instruction.Sources.Contains(bit))
+                return true;
+
+            if (instruction is not { Opcode: "SLshlB32", Sources.Count: 2, Destinations.Count: 1 } shift ||
+                !TryGetConstant(shift.Sources[0], out var one) || one != 1 || shift.Sources[1] != bit ||
+                shift.Destinations[0] is not { Kind: Gen5OperandKind.ScalarRegister } single)
+                continue;
+
+            for (var clearIndex = index + 1; clearIndex < end; clearIndex++)
+            {
+                var clear = instructions[clearIndex];
+                if (clear.Destinations.Contains(mask) && clear.Sources.Count == 2 &&
+                    ((clear.Opcode == "SXorB32" && clear.Sources.Contains(mask) && clear.Sources.Contains(single)) ||
+                     (clear.Opcode == "SAndn2B32" && clear.Sources[0] == mask && clear.Sources[1] == single)))
+                    return true;
+
+                if (clear.Destinations.Contains(single) || clear.Destinations.Contains(mask) || clear.Destinations.Contains(bit) ||
+                    (single.Value is 106 or 107 && clear.Opcode.StartsWith('V')))
+                    break;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool ReadsActiveLane(IReadOnlyList<Gen5ShaderInstruction> instructions, int readLaneIndex)
+    {
+        var exec = Gen5Operand.Scalar(126);
+        var readLane = instructions[readLaneIndex];
+        if (readLane is not { Opcode: "VReadlaneB32" } || readLane.Sources.Count < 2 ||
+            readLane.Sources[1] is not { Kind: Gen5OperandKind.ScalarRegister } lane)
+            return false;
+
+        var scanIndex = FindLastDefinition(instructions, readLaneIndex, lane);
+        if (scanIndex < 0 || instructions[scanIndex] is not { Opcode: "SFF1I32B64", Sources.Count: 1 } scan ||
+            scan.Sources[0] is not { Kind: Gen5OperandKind.ScalarRegister } candidates)
+            return false;
+
+        var copyIndex = FindLastDefinition(instructions, scanIndex, candidates);
+        if (copyIndex < 0 || instructions[copyIndex] is not { Opcode: "SMovB64", Sources.Count: 1 } copy || copy.Sources[0] != exec)
+            return false;
+
+        for (var index = copyIndex + 1; index < readLaneIndex; index++)
+        {
+            if (WritesScalarPair(instructions[index], exec) || WritesScalarPair(instructions[index], candidates) ||
+                Gen5IrBranchResolver.Instance.TryGetBranchTarget(instructions[index], out _))
+                return false;
+        }
+
+        var backIndex = -1;
+        for (var index = readLaneIndex + 1; index < instructions.Count; index++)
+        {
+            if (!Gen5IrBranchResolver.Instance.TryGetBranchTarget(instructions[index], out var target))
+                continue;
+            if (target > instructions[copyIndex].Pc && target <= instructions[scanIndex].Pc)
+            {
+                backIndex = index;
+                break;
+            }
+        }
+
+        if (backIndex < 0)
+            return false;
+
+        var restoreIndex = -1;
+        for (var index = backIndex - 1; index > readLaneIndex; index--)
+        {
+            if (WritesScalarPair(instructions[index], exec))
+            {
+                restoreIndex = index;
+                break;
+            }
+        }
+
+        if (restoreIndex < 0 || instructions[restoreIndex] is not { Opcode: "SMovB64", Sources.Count: 1 } restore ||
+            restore.Sources[0] is not { Kind: Gen5OperandKind.ScalarRegister } saved)
+            return false;
+
+        var saveIndex = FindLastDefinition(instructions, restoreIndex, saved);
+        if (saveIndex <= readLaneIndex || instructions[saveIndex].Opcode != "SAndSaveexecB64")
+            return false;
+
+        for (var index = readLaneIndex + 1; index < backIndex; index++)
+        {
+            var instruction = instructions[index];
+            if (index > saveIndex && index < restoreIndex && WritesScalarPair(instruction, saved))
+                return false;
+            if (WritesScalarPair(instruction, candidates) &&
+                (instruction is not { Opcode: "SAndn2B64", Sources.Count: 2 } || instruction.Sources[0] != candidates))
+                return false;
+            if (Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out var target) &&
+                (target <= instruction.Pc || target > instructions[restoreIndex].Pc))
+                return false;
+        }
+
+        return true;
+    }
+
+    private static bool WritesScalarPair(Gen5ShaderInstruction instruction, Gen5Operand register)
+    {
+        if (register.Value is 106 or 107 && instruction.Opcode.StartsWith('V'))
+            return true;
+        if (instruction.Control is Gen5Vop3Control { ScalarDestination: { } scalarDestination } &&
+            scalarDestination + 1 >= register.Value && scalarDestination <= register.Value + 1)
+            return true;
+        if (register.Value == 126 && (instruction.Opcode.Contains("Saveexec", StringComparison.Ordinal) ||
+            instruction.Opcode.StartsWith("VCmpx", StringComparison.Ordinal)))
+            return true;
+        var width = instruction.Opcode.Contains("64", StringComparison.Ordinal) ? 2u : 1u;
+        return instruction.Destinations.Any(destination => destination.Kind == Gen5OperandKind.ScalarRegister &&
+            destination.Value + width > register.Value && destination.Value <= register.Value + 1);
     }
 
     private static int FindLastDefinition(IReadOnlyList<Gen5ShaderInstruction> instructions, int before, Gen5Operand destination)

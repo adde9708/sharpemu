@@ -241,7 +241,7 @@
   "Options.Hdr.Desc": "Usa HDR quando lo schermo selezionato e il backend grafico lo supportano. La modalità automatica torna a SDR.",
   "Options.Hdr.Auto": "Automatico",
   "Options.Env.BinkPlayback.Label": "Riproduzione video Bink",
-  "Options.Env.BinkPlayback.Desc": "Host riproduce i video Bink tramite il bridge FFmpeg, ma alcuni giochi potrebbero avere problemi.\nGuest usa il decoder del motore di gioco, che SharpEmu attualmente supporta solo in parte.\nSkip salta i video Bink, facilitando lo sviluppo.",
+  "Options.Env.BinkPlayback.Desc": "Host riproduce i video Bink tramite il bridge FFmpeg, ma alcuni giochi potrebbero avere problemi.\nGuest usa il decoder del motore di gioco.\nSkip salta i video Bink, facilitando lo sviluppo.",
   "Options.Env.BinkPlayback.Host": "Host (FFmpeg)",
   "Options.Env.BinkPlayback.Guest": "Guest",
   "Options.Env.BinkPlayback.Skip": "Salta"

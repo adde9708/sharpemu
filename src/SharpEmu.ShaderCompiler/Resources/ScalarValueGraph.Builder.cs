@@ -1558,15 +1558,22 @@ public sealed partial class ScalarValueGraph
 
             var lane = instruction.Sources.Count > 1 ? Read(instruction.Sources[1], state) : _graph.Undefined(ScalarValueType.U32);
             if (instruction.Sources.Count < 2 ||
-                instruction.Sources[0] is not { Kind: Gen5OperandKind.VectorRegister } source ||
-                !lane.IsConstant ||
-                !state.Lanes.TryGetValue((source.Value, lane.ConstantU32 & 63), out var value))
+                instruction.Sources[0] is not { Kind: Gen5OperandKind.VectorRegister } source)
             {
                 state.WriteScalar(destination.Value, _graph.Undefined(ScalarValueType.U32));
                 return;
             }
 
-            state.WriteScalar(destination.Value, value);
+            if (lane.IsConstant && state.Lanes.TryGetValue((source.Value, lane.ConstantU32 & 63), out var value))
+            {
+                state.WriteScalar(destination.Value, value);
+                return;
+            }
+
+            var sourceValue = state.ReadVector(source.Value);
+            state.WriteScalar(destination.Value, !lane.IsConstant && sourceValue.IsUndefined
+                ? _graph.FirstLane(sourceValue, state.Exec, instruction.Pc)
+                : _graph.Undefined(ScalarValueType.U32));
         }
 
         // ---- memory instructions ----

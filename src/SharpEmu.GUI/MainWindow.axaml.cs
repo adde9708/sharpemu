@@ -327,7 +327,7 @@ public partial class MainWindow : Window
         VSyncToggle.IsCheckedChanged += (_, _) => _settings.VSync = VSyncToggle.IsChecked == true;
         HdrModeBox.SelectionChanged += (_, _) => _settings.HdrMode = SelectedComboText(HdrModeBox, "Auto");
         OverlayEnabledToggle.IsCheckedChanged += (_, _) => _settings.OverlayEnabled = OverlayEnabledToggle.IsChecked == true;
-        OverlayModeBox.SelectionChanged += (_, _) => _settings.OverlayMode = SelectedComboText(OverlayModeBox, "Full");
+        OverlayModeBox.SelectionChanged += (_, _) => _settings.OverlayMode = SelectedComboText(OverlayModeBox, "TitleBar");
         OverlayCornerBox.SelectionChanged += (_, _) => _settings.OverlayCorner = SelectedComboText(OverlayCornerBox, "TopRight");
         UpdateButton.Click += async (_, _) => await OnUpdateButtonAsync();
         SelectLogFilePathButton.Click += async (_, _) => await SelectLogFilePathAsync();
@@ -344,7 +344,7 @@ public partial class MainWindow : Window
         EnvWritableApp0Toggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_WRITABLE_APP0", EnvWritableApp0Toggle.IsChecked == true);
         BinkPlaybackBox.SelectionChanged += (_, _) =>
-            _settings.BinkPlaybackMode = SelectedComboText(BinkPlaybackBox, "Host");
+            _settings.BinkPlaybackMode = SelectedComboText(BinkPlaybackBox, "Guest");
         EnvVkValidationToggle.IsCheckedChanged += (_, _) =>
             SetEnvironmentToggle("SHARPEMU_VK_VALIDATION", EnvVkValidationToggle.IsChecked == true);
         EnvDumpSpirvToggle.IsCheckedChanged += (_, _) =>
@@ -2544,6 +2544,11 @@ public partial class MainWindow : Window
             StrictComputeSettings.GetLaunchValue(effective.EnvironmentToggles));
         _appliedEnvironmentVariables.Add(StrictComputeSettings.VariableName);
         _appliedEnvironmentVariables.Add(DefaultProfileEnvironmentName);
+
+        // An absent switch now enables the guard opt-out by default; send 0 for a disabled GUI toggle.
+        Environment.SetEnvironmentVariable("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD",
+            effective.EnvironmentToggles.Contains("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD") ? "1" : "0");
+        _appliedEnvironmentVariables.Add("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD");
 
         Environment.SetEnvironmentVariable(
             BinkModeEnvironmentName,

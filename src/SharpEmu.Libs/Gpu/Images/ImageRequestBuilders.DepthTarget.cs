@@ -231,10 +231,10 @@ public static partial class ImageRequestBuilders
     // Builds the request for a video-out surface registered by the guest.
     public static ImageRequest DisplaySurface(in DisplaySurfaceWords surface)
     {
-        const ulong StrictColorimetryOption = 1;
+        const ulong SupportedOptions = (1UL << 3) | (1UL << 5); // Strict colorimetry and premultiplied alpha.
         var compression = ImageDescription.ClassifyDisplayCompression(surface.Compressed, surface.MetadataAddress, surface.DccControl, surface.DccClearColor);
         if (surface.Width == 0 || surface.Height == 0 || surface.Width > 16384 || surface.Height > 16384 ||
-            (surface.Option != 0 && surface.Option != StrictColorimetryOption) || surface.TilingMode != 0 || surface.DataAddress == 0 ||
+            (surface.Option & ~SupportedOptions) != 0 || surface.TilingMode != 0 || surface.DataAddress == 0 ||
             compression == DisplayCompression.Unsupported)
         {
             throw SubmissionScheduler.Fatal(

@@ -11,12 +11,14 @@ namespace SharpEmu.ShaderCompiler.Tests;
 public sealed class Gen5SharedMemoryBarrierTests
 {
     [Theory]
-    [InlineData(64u, 64u, false, 2)]
-    [InlineData(64u, 64u, true, 2)]
-    [InlineData(32u, 64u, false, 0)]
-    [InlineData(64u, 128u, false, 0)]
+    [InlineData(64u, 64u, false, false, 2)]
+    [InlineData(64u, 64u, true, false, 2)]
+    [InlineData(32u, 64u, false, false, 0)]
+    [InlineData(64u, 128u, false, false, 0)]
+    [InlineData(64u, 64u, false, true, 2)]
+    [InlineData(32u, 64u, false, true, 0)]
     public void SharedMemoryPhases_SynchronizeOnlySingleWaveGroups(
-        uint waveSize, uint threadCount, bool explicitBarrier, int expectedBarriers)
+        uint waveSize, uint threadCount, bool explicitBarrier, bool splitBlocks, int expectedBarriers)
     {
         var instructions = new List<Gen5ShaderInstruction>
         {
@@ -25,6 +27,8 @@ public sealed class Gen5SharedMemoryBarrierTests
         };
         if (explicitBarrier)
             instructions.Add(new(8, Gen5ShaderEncoding.Sopp, "SBarrier", [0u], [], [], null));
+        if (splitBlocks)
+            instructions.Add(new(8, Gen5ShaderEncoding.Sopp, "SBranch", [0u], [], [], null));
         instructions.Add(new(12, Gen5ShaderEncoding.Ds, "DsReadB32", [0u, 0u],
             [Gen5Operand.Vector(0)], [Gen5Operand.Vector(2)], new Gen5DataShareControl(0, 0, false)));
         instructions.Add(new(20, Gen5ShaderEncoding.Sopp, "SEndpgm", [0u], [], [], null));

@@ -525,6 +525,46 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
     }
 
     [Fact]
+    public void PrepareBindings_MergesDeviceAddressRangesBeforeBuffersAreBound()
+    {
+        if (!Ready()) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        using var fatal = new FatalScope();
+        presenter.SetField("_minStorageBufferOffsetAlignment", 256UL);
+        presenter.LoadRenderingCommands();
+        var harness = presenter.Harness;
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var written = address + 0x100;
+        var resource = new BufferResource { Read = true, Written = true, MaxByteExtent = 32 };
+        var program = FixedProgramProvider.EmptyProgram(ShaderStageKind.Compute, 3,
+            new ShaderResourceInfo { Buffers = [resource] });
+        var snapshot = new ResourceSnapshot
+        {
+            Buffers = [[(uint)written, (uint)(written >> 32), 32, 0]],
+            DeviceAddressRanges = [new DeviceAddressRange(0, address, 2 * GuestBufferCache.CachingPageSize, true, false)],
+        };
+        GuestGpuMemoryHook.Attach(harness.Gpu);
+        try
+        {
+            presenter.Run(() =>
+            {
+                using var preparation = presenter.RenderHost.BeginPreparation();
+                var prepared = presenter.RenderHost.PrepareBindings(new ShaderStageResources(program, snapshot));
+                presenter.RenderHost.PrepareDeviceAddresses();
+                var owner = harness.Cache.GetBuffer(harness.Cache.FindBuffer(written, 32));
+                presenter.RenderHost.BindResources(prepared);
+                Assert.Same(owner, harness.Cache.GetBuffer(harness.Cache.FindBuffer(written, 32)));
+                Assert.Equal(1, harness.Cache.BufferCount);
+            });
+        }
+        finally
+        {
+            GuestGpuMemoryHook.Attach(null);
+        }
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void PrepareBindings_PrivateBufferUploadsCurrentBytesAndStillRejectsGpuWrites()
     {
         if (!Ready()) return;

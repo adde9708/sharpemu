@@ -586,7 +586,7 @@ public sealed partial class GuestImageCache
         return replacementImageIdentifier;
     }
 
-    private void AssociateStencilRange(ResourceSlotIdentifier depthImageIdentifier, GuestSpan stencil)
+    private ResourceSlotIdentifier AssociateStencilRange(ResourceSlotIdentifier depthImageIdentifier, GuestSpan stencil)
     {
         if (!ImageDescription.IsValidRange(stencil))
         {
@@ -620,5 +620,6 @@ public sealed partial class GuestImageCache
         var record = _slots[association];
         TouchImage(record);
         record.AssociateDepth(depthImageIdentifier);
+        return association;
     }
 }

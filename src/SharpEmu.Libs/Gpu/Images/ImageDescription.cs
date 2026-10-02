@@ -245,6 +245,24 @@ public struct ImageDescription
 
     public readonly bool IsTiledRenderTarget => TileMode == GuestTileMode.RenderTarget || IsSupportedStandard64RenderTarget;
 
+    public readonly ulong DccSliceSize
+    {
+        get
+        {
+            const ulong DccBlockBytes = 4096;
+            if (Metadata.Kind != MetadataKind.Dcc || TileMode != GuestTileMode.RenderTarget || Resources.Levels != 1 || Samples != 1 ||
+                Extent.Width == 0 || Extent.Height == 0 || BytesPerBlock is 0 or > 16 || !System.Numerics.BitOperations.IsPow2(BytesPerBlock))
+            {
+                return 0;
+            }
+
+            var coverageBits = 20 - System.Numerics.BitOperations.TrailingZeroCount(BytesPerBlock);
+            var blockWidth = 1UL << ((coverageBits + 1) / 2);
+            var blockHeight = 1UL << (coverageBits / 2);
+            return (Extent.Width + blockWidth - 1) / blockWidth * ((Extent.Height + blockHeight - 1) / blockHeight) * DccBlockBytes;
+        }
+    }
+
     public static bool IsSupportedDisplayRenderTargetTileMode(GuestTileMode tileMode) => tileMode == GuestTileMode.RenderTarget;
 
     public static bool CanUseDisplayNativeWithoutUpload(DisplayCompression compression, bool renderTarget, bool gpuModified, bool guestModified) =>
@@ -439,7 +457,7 @@ public sealed record DepthFormatRule(GuestDepthFormat DepthFormat, GuestPixelFor
 
 public readonly record struct DisplayPixelFormat(Format HostFormat, GuestPixelFormat GuestFormat, uint BytesPerElement, bool Bgra16);
 
-// The six display surface pixel formats the store accepts.
+// Display formats retain their encoded values; presentation applies the transfer function.
 public static class DisplayFormatRule
 {
     public static readonly (ulong PixelFormat, DisplayPixelFormat Info)[] Table =
@@ -448,6 +466,10 @@ public static class DisplayFormatRule
         (0x8000000000000000, new DisplayPixelFormat(Format.B8G8R8A8Srgb, GuestPixelFormat.Bits8_8_8_8Srgb, 4, false)),
         (0x8100000022000000, new DisplayPixelFormat(Format.A2B10G10R10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
         (0x8100000000000000, new DisplayPixelFormat(Format.A2R10G10B10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
+        (0x8100000622000000, new DisplayPixelFormat(Format.A2B10G10R10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
+        (0x8100000600000000, new DisplayPixelFormat(Format.A2R10G10B10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
+        (0x8100070422000000, new DisplayPixelFormat(Format.A2B10G10R10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
+        (0x8100070400000000, new DisplayPixelFormat(Format.A2R10G10B10UnormPack32, GuestPixelFormat.Bits10_10_10_2UNorm, 4, false)),
         (0xc001000622000000, new DisplayPixelFormat(Format.R16G16B16A16Sfloat, GuestPixelFormat.Bits16_16_16_16Float, 8, false)),
         (0xc001000600000000, new DisplayPixelFormat(Format.R16G16B16A16Sfloat, GuestPixelFormat.Bits16_16_16_16Float, 8, true)),
     ];

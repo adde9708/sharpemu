@@ -283,11 +283,7 @@ internal static class HostMovieBridge
             return MovieMode.Native;
         }
 
-        // Native is the default: FfmpegVideoDecoder.TryOpen degrades gracefully
-        // (falls back to the guest's own decode, logging one informational line)
-        // if the FFmpeg libraries SharpEmu.CLI.csproj downloads next to the
-        // executable are genuinely unavailable, so defaulting to it is safe.
-        return MovieMode.Native;
+        return MovieMode.Guest;
     }
 
     private static void AttachDummyMovieLocked(string hostPath)

@@ -549,7 +549,7 @@ internal static unsafe partial class VulkanVideoPresenter
             try
             {
                 var surface = new DisplaySurfaceWords(
-                    displayBuffer.Address, 0, displayBuffer.PixelFormat, displayBuffer.Width, displayBuffer.Height, displayBuffer.TilingMode, 0, 0, 0, false);
+                    displayBuffer.Address, 0, displayBuffer.PixelFormat, displayBuffer.Width, displayBuffer.Height, displayBuffer.TilingMode, displayBuffer.Option, 0, 0, false);
                 var request = ImageRequestBuilders.DisplaySurface(surface);
                 _ = BeginBatchedGuestCommands();
                 var imageIdentifier = _imageCache.FindImage(ref request);

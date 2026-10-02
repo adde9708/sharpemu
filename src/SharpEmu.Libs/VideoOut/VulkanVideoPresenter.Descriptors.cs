@@ -296,6 +296,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 descriptors.GlobalDataShare = new BufferView(_bufferCache.GdsBuffer.Handle, 0, Vk.WholeSize);
             }
 
+            FindDeviceAddressBuffers(prepared);
             FindBuffers(prepared);
             preparation.Stages.Add(prepared);
             ValidateDrawImageTypes(prepared);
@@ -330,6 +331,21 @@ internal static unsafe partial class VulkanVideoPresenter
                     throw new DrawImageTypeMismatchException(
                         prepared.Program.Hash, binding.Address, image.Backing.ImageType, view.Type);
                 }
+            }
+        }
+
+        private void FindDeviceAddressBuffers(PreparedStageBindings prepared)
+        {
+            foreach (var range in prepared.Stage.Resources.DeviceAddressRanges)
+            {
+                if (!range.Planned || range.Size == 0 ||
+                    range.Base >= PageOwnerTable.AddressSpaceSize || range.Size > PageOwnerTable.AddressSpaceSize - range.Base ||
+                    (!range.Written && !_guestMemory.CanRead(range.Base, 1)))
+                {
+                    continue;
+                }
+
+                _ = _bufferCache.FindBuffer(range.Base, ClampMappedSize(range.Base, range.Size));
             }
         }
 

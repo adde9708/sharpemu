@@ -16,7 +16,7 @@ public sealed class PerformanceOverlayTests
     public void FullPanelUsesSelectedCorner(PerformanceOverlayCorner corner, int left, int top)
     {
         var state = new PerformanceOverlayState();
-        state.Configure(new HostVideoOptions { OverlayCorner = corner }, false);
+        state.Configure(new HostVideoOptions { OverlayCorner = corner, OverlayMode = PerformanceOverlayMode.Full }, false);
 
         Assert.Equal(
             new OverlayRectangle(left, top, PerfOverlay.PanelWidth, PerfOverlay.PanelHeight),
@@ -31,7 +31,7 @@ public sealed class PerformanceOverlayTests
     public void SmallSurfaceClipsPanelInsideItsBounds(PerformanceOverlayCorner corner)
     {
         var state = new PerformanceOverlayState();
-        state.Configure(new HostVideoOptions { OverlayCorner = corner }, false);
+        state.Configure(new HostVideoOptions { OverlayCorner = corner, OverlayMode = PerformanceOverlayMode.Full }, false);
         foreach (var size in new[] { 0, 1, 12, 24, 100, 4096 })
         {
             var rectangle = state.GetRectangle(size, size);
@@ -71,9 +71,10 @@ public sealed class PerformanceOverlayTests
     {
         var state = new PerformanceOverlayState();
         state.Configure(HostVideoOptions.Default, true);
-        Assert.False(state.DrawOnScreen);
+        Assert.False(state.Enabled);
         state.Toggle();
-        Assert.True(state.DrawOnScreen);
+        Assert.True(state.Enabled);
+        Assert.Equal(PerformanceOverlayMode.TitleBar, state.Mode);
     }
 
     [Theory]
@@ -149,7 +150,7 @@ public sealed class PerformanceOverlayTests
             OverlayEnabled = false,
         }.Normalize();
         Assert.Equal(PerformanceOverlayCorner.TopRight, options.OverlayCorner);
-        Assert.Equal(PerformanceOverlayMode.Full, options.OverlayMode);
+        Assert.Equal(PerformanceOverlayMode.TitleBar, options.OverlayMode);
         Assert.False(options.OverlayEnabled);
     }
 

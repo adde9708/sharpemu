@@ -361,6 +361,22 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         Assert.Equal(ImageUsageFlags.TransferSrcBit, request.View.Usage);
     }
 
+    [Theory]
+    [InlineData(0x8100070422000000UL, Format.A2B10G10R10UnormPack32, 8UL)]
+    [InlineData(0x8100070400000000UL, Format.A2R10G10B10UnormPack32, 40UL)]
+    [InlineData(0x8100000622000000UL, Format.A2B10G10R10UnormPack32, 32UL)]
+    [InlineData(0x8100000600000000UL, Format.A2R10G10B10UnormPack32, 0UL)]
+    public void DisplaySurface_Packed10BitFormatsPreserveEncodedValues(ulong pixelFormat, Format expectedFormat, ulong option)
+    {
+        var surface = new DisplaySurfaceWords(Base, 0, pixelFormat, 3840, 2160, 0, option, 0, 0, false);
+        var request = ImageRequestBuilders.DisplaySurface(surface);
+        Assert.Equal(expectedFormat, request.Description.PixelFormat);
+        Assert.Equal(GuestPixelFormat.Bits10_10_10_2UNorm, request.Description.GuestFormat);
+        Assert.Equal(4u, request.Description.BytesPerBlock);
+        Assert.Equal(expectedFormat, request.View.Format);
+        Assert.True(DisplayFormatRule.Supports(request.Description));
+    }
+
     [Fact]
     public void DisplaySurface_RejectsUnsupportedAttributes()
     {
@@ -368,7 +384,8 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         Assert.Throws<SchedulerFatalException>(() => ImageRequestBuilders.DisplaySurface(new DisplaySurfaceWords(Base, 0, 0x8000000022000000, 1920, 1080, 1, 0, 0, 0, false)));
         Assert.Throws<SchedulerFatalException>(() => ImageRequestBuilders.DisplaySurface(new DisplaySurfaceWords(Base, 0, 0x1234, 1920, 1080, 0, 0, 0, 0, false)));
         Assert.Throws<SchedulerFatalException>(() => ImageRequestBuilders.DisplaySurface(new DisplaySurfaceWords(Base, 0, 0x8000000022000000, 0, 1080, 0, 0, 0, 0, false)));
-        Assert.Equal(3, fatal.Messages.Count);
+        Assert.Throws<SchedulerFatalException>(() => ImageRequestBuilders.DisplaySurface(new DisplaySurfaceWords(Base, 0, 0x8100070422000000, 1920, 1080, 0, 1, 0, 0, false)));
+        Assert.Equal(4, fatal.Messages.Count);
     }
 
     private readonly record struct GuestSpanCheck(ulong Address, ulong Size);

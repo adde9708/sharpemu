@@ -9,12 +9,15 @@ namespace SharpEmu.Libs.Tests.GUI;
 public sealed class GuiSettingsTests
 {
     [Fact]
-    public void NewSettingsEnableWritableApp0WithoutCrashCapture()
+    public void NewSettingsEnableWritableApp0AndDisableImportLoopGuard()
     {
         var settings = new GuiSettings();
-        Assert.Equal(["SHARPEMU_WRITABLE_APP0"], settings.EnvironmentToggles);
+        Assert.Equal(["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"], settings.EnvironmentToggles);
+        Assert.True(settings.OverlayEnabled);
+        Assert.Equal("TitleBar", settings.OverlayMode);
+        Assert.Equal("Guest", settings.BinkPlaybackMode);
         settings.EnvironmentToggles.Clear();
-        Assert.Equal(["SHARPEMU_WRITABLE_APP0"], new GuiSettings().EnvironmentToggles);
+        Assert.Equal(["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"], new GuiSettings().EnvironmentToggles);
     }
 
     [Theory]
@@ -24,8 +27,16 @@ public sealed class GuiSettingsTests
     {
         var settings = GuiSettings.NormalizeFromJson(json);
         Assert.DoesNotContain("SHARPEMU_WRITABLE_APP0", settings.EnvironmentToggles);
+        Assert.DoesNotContain("SHARPEMU_DISABLE_IMPORT_LOOP_GUARD", settings.EnvironmentToggles);
         var restored = GuiSettings.NormalizeFromJson(System.Text.Json.JsonSerializer.Serialize(settings));
         Assert.Equal(settings.EnvironmentToggles, restored.EnvironmentToggles);
+    }
+
+    [Fact]
+    public void SavedHostPlaybackChoiceSurvivesNewGuestDefault()
+    {
+        var settings = GuiSettings.NormalizeFromJson("""{"BinkPlaybackMode":"Host"}""");
+        Assert.Equal("Host", settings.BinkPlaybackMode);
     }
 
     [Theory]
@@ -98,7 +109,7 @@ public sealed class GuiSettingsTests
         Assert.Equal("1525606762248540221", settings.DiscordClientId);
         Assert.Empty(settings.GameFolders);
         Assert.Empty(settings.ExcludedGames);
-        Assert.Equal(["SHARPEMU_WRITABLE_APP0"], settings.EnvironmentToggles);
+        Assert.Equal(["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"], settings.EnvironmentToggles);
         Assert.Equal("Windowed", settings.WindowMode);
         Assert.Equal("1920x1080", settings.Resolution);
         Assert.Equal("Fit", settings.ScalingMode);
@@ -289,7 +300,7 @@ public sealed class GuiSettingsTests
         Assert.Equal("1525606762248540221", settings.DiscordClientId);
         Assert.Empty(settings.GameFolders);
         Assert.Empty(settings.ExcludedGames);
-        Assert.Equal(["SHARPEMU_WRITABLE_APP0"], settings.EnvironmentToggles);
+        Assert.Equal(["SHARPEMU_WRITABLE_APP0", "SHARPEMU_DISABLE_IMPORT_LOOP_GUARD"], settings.EnvironmentToggles);
     }
 
     [Fact]

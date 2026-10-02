@@ -190,7 +190,7 @@ public sealed unsafe partial class GuestImageCache
         return tiles;
     }
 
-    private static BufferImageCopy[] DepthCopies(in ImageDescription info, ulong sliceSize)
+    private static BufferImageCopy[] DepthCopies(in ImageDescription info, ulong sliceSize, ImageAspectFlags aspect = ImageAspectFlags.DepthBit)
     {
         var copies = new BufferImageCopy[info.Resources.Layers];
         for (uint layer = 0; layer < info.Resources.Layers; layer++)
@@ -200,7 +200,7 @@ public sealed unsafe partial class GuestImageCache
                 BufferOffset = sliceSize * layer,
                 BufferRowLength = info.Pitch,
                 BufferImageHeight = info.Extent.Height,
-                ImageSubresource = new ImageSubresourceLayers(ImageAspectFlags.DepthBit, 0, layer, 1),
+                ImageSubresource = new ImageSubresourceLayers(aspect, 0, layer, 1),
                 ImageExtent = new Extent3D(info.Extent.Width, info.Extent.Height, 1),
             };
         }
@@ -230,8 +230,44 @@ public sealed unsafe partial class GuestImageCache
         image.UploadFromBuffer(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(copies), linear.Buffer, linear.Offset, linear.Size);
     }
 
+    private void UploadStencilPlane(CachedImage association, GpuBuffer source, ulong sourceOffset)
+    {
+        var destination = _slots[association.DepthOwner];
+        var info = destination.Description;
+        info.Data = association.Description.Data;
+        info.GuestFormat = GuestPixelFormat.Bits8UInt;
+        info.BytesPerBlock = 1;
+        if (info.IsTiled)
+        {
+            info.Pitch = TileGeometry.DepthPitch(info.Extent.Width, 1);
+        }
+
+        if (info.Samples != 1 || destination.Backing.Samples != 1 || info.Resources.Layers == 0 || info.Data.Size % info.Resources.Layers != 0)
+        {
+            throw SubmissionScheduler.Fatal(
+                $"The stencil upload is invalid: address=0x{info.Data.Address:X16} size=0x{info.Data.Size:X} layers={info.Resources.Layers} samples={info.Samples} backingSamples={destination.Backing.Samples}.");
+        }
+
+        var fullSliceSize = info.Data.Size / info.Resources.Layers;
+        var copies = DepthCopies(info, fullSliceSize, ImageAspectFlags.StencilBit);
+        var linear = new TilerBufferSpan(source.Handle, sourceOffset, source.Size - sourceOffset);
+        if (info.IsTiled)
+        {
+            var tiles = DepthTileTransfers(info, DepthBlock(info), fullSliceSize);
+            linear = _tiler.Detile(source.Handle, sourceOffset, info.Data.Size, info.Data.Size, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(tiles));
+        }
+
+        UploadRegions(destination, copies.ToList(), linear);
+    }
+
     private void UploadFromBuffer(CachedImage image, in ImageRequest request, GpuBuffer source, ulong sourceOffset)
     {
+        if (image.DepthOwner.IsValid)
+        {
+            UploadStencilPlane(image, source, sourceOffset);
+            return;
+        }
+
         ref readonly var info = ref image.Description;
         if (request.Role != ImageRole.DepthTarget)
         {
@@ -830,6 +866,11 @@ public sealed unsafe partial class GuestImageCache
         }
 
         TakeGpuOwnership(image);
+        if (aspect == ImageAspectFlags.StencilBit)
+        {
+            TakeStencilOwnership(selected, image);
+        }
+
         return true;
     }
 }

@@ -543,4 +543,69 @@ public sealed unsafe partial class GuestImageCacheTests
         Assert.Equal(Bytes((ushort)0x0000, (ushort)0x2468, (ushort)0xabcd, (ushort)0xffff), harness.ReadImageBytes(harness.Image(storageId)));
         harness.Shutdown();
     }
+
+    [Fact]
+    public void StencilPlaneWrites_ReachTheCombinedAttachment()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        var stencilFormat = SupportedStencilFormat(_vulkan, SampleCountFlags.Count1Bit);
+        if (stencilFormat == Format.Undefined) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var depthAddress = address + 0xc000;
+        var stencilAddress = address + 0xd000;
+        harness.Write(depthAddress, Bytes((ushort)0x1111, (ushort)0x2222, (ushort)0x3333, (ushort)0x4444));
+        harness.Write(stencilAddress, [0x56, 0x56, 0x00, 0x56]);
+        var depth = LinearRequest(depthAddress, 8, stencilFormat, GuestPixelFormat.Bits16UNorm, GuestImageType.Color2D, new Extent3D(4, 1, 1), 1, 2, 1);
+        depth = AsDepthTarget(depth, stencilFormat);
+        depth.Description.Stencil = new GuestSpan(stencilAddress, 4);
+        depth.View = depth.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
+        byte[] Stencil(ResourceSlotIdentifier id) => harness.ReadImageBytes(harness.Image(id), ImageAspectFlags.StencilBit)[..4];
+
+        var depthId = harness.Acquire(ref depth);
+        Assert.Equal(new byte[] { 0x56, 0x56, 0x00, 0x56 }, Stencil(depthId));
+
+        harness.Write(stencilAddress, [0x01, 0x02, 0x03, 0x04]);
+        Assert.True(harness.WriteFault(stencilAddress));
+        Assert.Equal(depthId, harness.Acquire(ref depth));
+        Assert.Equal(new byte[] { 0x01, 0x02, 0x03, 0x04 }, Stencil(depthId));
+
+        harness.Worker.Run(() => harness.Cache.FillBuffer(stencilAddress, 4, 0, false));
+        Assert.Equal(depthId, harness.Acquire(ref depth));
+        Assert.Equal(new byte[4], Stencil(depthId));
+
+        harness.Write(stencilAddress, [0x09, 0x09, 0x09, 0x09]);
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(stencilAddress, 4, 0x07070707)));
+        Assert.Equal(depthId, harness.Acquire(ref depth));
+        Assert.Equal(new byte[] { 0x07, 0x07, 0x07, 0x07 }, Stencil(depthId));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void TiledStencilPlaneWrites_ReachTheCombinedAttachment()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        const ImageUsageFlags usage = ImageUsageFlags.TransferSrcBit | ImageUsageFlags.TransferDstBit | ImageUsageFlags.DepthStencilAttachmentBit;
+        if (!_vulkan.DeviceInfo.TryGetImageFormatProperties(Format.D32SfloatS8Uint, ImageType.Type2D, ImageTiling.Optimal, usage, 0, out _)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const ulong planeSize = 0x10000;
+        const int texels = 128 * 128;
+        var address = harness.MapBacked(planeSize * 3, ReadWrite);
+        var stencilAddress = address + planeSize;
+        harness.Write(stencilAddress, Enumerable.Repeat((byte)0x5a, (int)planeSize).ToArray());
+        var depth = LinearRequest(address, planeSize, Format.D32SfloatS8Uint, GuestPixelFormat.Bits32Float, GuestImageType.Color2D, new Extent3D(128, 128, 1), 1, 4, 1);
+        depth.Description.TileMode = GuestTileMode.Depth;
+        depth = AsDepthTarget(depth, Format.D32SfloatS8Uint);
+        depth.Description.Stencil = new GuestSpan(stencilAddress, planeSize);
+        depth.View = depth.View with { Aspect = ImageAspectFlags.DepthBit | ImageAspectFlags.StencilBit };
+        byte[] Stencil(ResourceSlotIdentifier id) => harness.ReadImageBytes(harness.Image(id), ImageAspectFlags.StencilBit)[..texels];
+
+        var depthId = harness.Acquire(ref depth);
+        Assert.All(Stencil(depthId), value => Assert.Equal(0x5a, value));
+
+        harness.Worker.Run(() => harness.Cache.FillBuffer(stencilAddress, planeSize, 0, false));
+        Assert.Equal(depthId, harness.Acquire(ref depth));
+        Assert.All(Stencil(depthId), value => Assert.Equal(0, value));
+        harness.Shutdown();
+    }
 }

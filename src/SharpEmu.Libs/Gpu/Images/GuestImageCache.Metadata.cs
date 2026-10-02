@@ -84,6 +84,70 @@ public sealed partial class GuestImageCache
         return false;
     }
 
+    public static bool IsDccClearCode(byte code) => code is 0x00 or 0x20 or 0x40 or 0x80 or 0xc0;
+
+    public bool TryReadGuestDccClear(ulong metadataAddress, ulong sliceSize, uint slice, out ulong sliceAddress, out byte code)
+    {
+        sliceAddress = 0;
+        code = 0;
+        if (metadataAddress == 0 || sliceSize == 0 || sliceSize > int.MaxValue ||
+            (ulong)slice > (ulong.MaxValue - metadataAddress) / sliceSize)
+        {
+            return false;
+        }
+
+        var address = metadataAddress + (ulong)slice * sliceSize;
+        if (!IsValidRange(address, sliceSize) || _bufferCache.HasGpuDirtyBytes(address, sliceSize))
+        {
+            return false;
+        }
+
+        Span<byte> first = stackalloc byte[1];
+        if (!_backing.TryReadBacking(address, first) || !IsDccClearCode(first[0]))
+        {
+            return false;
+        }
+
+        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent((int)Math.Min(sliceSize, 64 * 1024));
+        try
+        {
+            for (ulong position = 0; position < sliceSize;)
+            {
+                var span = buffer.AsSpan(0, (int)Math.Min(sliceSize - position, (ulong)buffer.Length));
+                if (!_backing.TryReadBacking(address + position, span) || span.IndexOfAnyExcept(first[0]) >= 0)
+                {
+                    return false;
+                }
+
+                position += (ulong)span.Length;
+            }
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(buffer);
+        }
+
+        sliceAddress = address;
+        code = first[0];
+        return true;
+    }
+
+    public void SynchronizeGuestDccMetadata(ulong metadataAddress, ulong sliceSize, uint baseLayer, uint layerCount)
+    {
+        if (metadataAddress == 0 || sliceSize == 0 || layerCount == 0 ||
+            (ulong)baseLayer + layerCount > (ulong.MaxValue - metadataAddress) / sliceSize)
+        {
+            return;
+        }
+
+        var address = metadataAddress + (ulong)baseLayer * sliceSize;
+        var size = (ulong)layerCount * sliceSize;
+        if (IsValidRange(address, size) && _bufferCache.HasGpuDirtyBytes(address, size))
+        {
+            _ = _bufferCache.TrySynchronizeCpuRead(address, size);
+        }
+    }
+
     public bool SetMetadataSlice(ulong address, uint slice, bool isClear)
     {
         using var held = _lock.Hold();

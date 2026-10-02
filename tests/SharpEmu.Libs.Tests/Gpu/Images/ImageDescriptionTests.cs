@@ -112,7 +112,7 @@ public sealed class ImageDescriptionTests
     }
 
     [Fact]
-    public void DisplayFormats_DecodeTheSixPixelFormats()
+    public void DisplayFormats_DecodeSupportedPixelFormats()
     {
         Assert.True(DisplayFormatRule.TryDecode(0x8000000022000000, out var rgba));
         Assert.Equal((Format.R8G8B8A8Srgb, GuestPixelFormat.Bits8_8_8_8Srgb, 4u, false), (rgba.HostFormat, rgba.GuestFormat, rgba.BytesPerElement, rgba.Bgra16));
@@ -257,6 +257,28 @@ public sealed class ImageDescriptionTests
         association.Validate();
         association.Pitch = 4;
         Reject(association, "stencil-association image", fatal);
+    }
+
+    [Theory]
+    [InlineData(2560u, 1440u, 8u, 1u, 1u, 0x1E000ul)]
+    [InlineData(1920u, 1080u, 4u, 1u, 1u, 0xC000ul)]
+    [InlineData(3840u, 2160u, 4u, 1u, 1u, 0x28000ul)]
+    [InlineData(640u, 360u, 16u, 1u, 1u, 0x6000ul)]
+    [InlineData(1920u, 1080u, 12u, 1u, 1u, 0ul)]
+    [InlineData(1920u, 1080u, 4u, 2u, 1u, 0ul)]
+    [InlineData(1920u, 1080u, 4u, 1u, 2u, 0ul)]
+    public void DccSliceSize_CoversOneMetadataBytePerColorBlock(uint width, uint height, uint bytesPerElement, uint levels, uint samples, ulong expected)
+    {
+        var description = Color(Base, 0x100, width, height, levels);
+        description.BytesPerBlock = bytesPerElement;
+        description.Samples = samples;
+        description.TileMode = GuestTileMode.RenderTarget;
+        description.Metadata.Kind = MetadataKind.Dcc;
+        description.Metadata.Range = new GuestSpan(0x200000, 0);
+        Assert.Equal(expected, description.DccSliceSize);
+
+        description.TileMode = GuestTileMode.Linear;
+        Assert.Equal(0ul, description.DccSliceSize);
     }
 
     [Fact]

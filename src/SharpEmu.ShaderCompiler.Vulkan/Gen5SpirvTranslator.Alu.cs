@@ -840,52 +840,17 @@ public static partial class Gen5SpirvTranslator
                         right = BitwiseAnd(right, UInt(0x00FF_FFFF));
                     }
 
-                    var wideLeft = _module.AddInstruction(
-                        SpirvOp.UConvert,
-                        _ulongType,
-                        left);
-                    var wideRight = _module.AddInstruction(
-                        SpirvOp.UConvert,
-                        _ulongType,
-                        right);
-                    var product = _module.AddInstruction(
-                        SpirvOp.IMul,
-                        _ulongType,
-                        wideLeft,
-                        wideRight);
-                    result = _module.AddInstruction(
-                        SpirvOp.UConvert,
-                        _uintType,
-                        ShiftRightLogical64(
-                            product,
-                            _module.Constant64(_ulongType, 32)));
+                    result = MultiplyExtended(left, right, signed: false).High;
                     break;
                 }
                 case "VMulHiI32":
                 {
-                    var wideLeft = _module.AddInstruction(
-                        SpirvOp.SConvert,
-                        _longType,
-                        Bitcast(_intType, GetRawSource(instruction, 0)));
-                    var wideRight = _module.AddInstruction(
-                        SpirvOp.SConvert,
-                        _longType,
-                        Bitcast(_intType, GetRawSource(instruction, 1)));
-                    var product = _module.AddInstruction(
-                        SpirvOp.IMul,
-                        _longType,
-                        wideLeft,
-                        wideRight);
                     result = Bitcast(
                         _uintType,
-                        _module.AddInstruction(
-                            SpirvOp.SConvert,
-                            _intType,
-                            _module.AddInstruction(
-                                SpirvOp.ShiftRightArithmetic,
-                                _longType,
-                                product,
-                                _module.Constant64(_longType, 32))));
+                        MultiplyExtended(
+                            Bitcast(_intType, GetRawSource(instruction, 0)),
+                            Bitcast(_intType, GetRawSource(instruction, 1)),
+                            signed: true).High);
                     break;
                 }
                 case "VBcntU32B32":
@@ -1319,19 +1284,8 @@ public static partial class Gen5SpirvTranslator
                     // sources are 32-bit factors; the third is a 64-bit addend
                     // held in a VGPR or SGPR pair. Its SDST receives the carry
                     // mask for the unsigned 64-bit addition.
-                    var wideLeft = _module.AddInstruction(
-                        SpirvOp.UConvert,
-                        _ulongType,
-                        GetRawSource(instruction, 0));
-                    var wideRight = _module.AddInstruction(
-                        SpirvOp.UConvert,
-                        _ulongType,
-                        GetRawSource(instruction, 1));
-                    var product = _module.AddInstruction(
-                        SpirvOp.IMul,
-                        _ulongType,
-                        wideLeft,
-                        wideRight);
+                    var (productLow, productHigh) = MultiplyExtended(GetRawSource(instruction, 0), GetRawSource(instruction, 1), signed: false);
+                    var product = Pair64(productLow, productHigh);
                     var addend = GetRawSource64(instruction, 2);
                     var wideResult = _module.AddInstruction(
                         SpirvOp.IAdd,
@@ -3033,47 +2987,13 @@ public static partial class Gen5SpirvTranslator
                                 right);
                             break;
                         case "SMulHiI32":
-                        {
-                            var wideLeft = _module.AddInstruction(
-                                SpirvOp.SConvert,
-                                _longType,
-                                Bitcast(_intType, left));
-                            var wideRight = _module.AddInstruction(
-                                SpirvOp.SConvert,
-                                _longType,
-                                Bitcast(_intType, right));
-                            var product = _module.AddInstruction(
-                                SpirvOp.IMul,
-                                _longType,
-                                wideLeft,
-                                wideRight);
                             result = Bitcast(
                                 _uintType,
-                                _module.AddInstruction(
-                                    SpirvOp.SConvert,
-                                    _intType,
-                                    _module.AddInstruction(
-                                        SpirvOp.ShiftRightArithmetic,
-                                        _longType,
-                                        product,
-                                        _module.Constant64(_longType, 32))));
+                                MultiplyExtended(Bitcast(_intType, left), Bitcast(_intType, right), signed: true).High);
                             break;
-                        }
                         case "SMulHiU32":
-                        {
-                            var product = _module.AddInstruction(
-                                SpirvOp.IMul,
-                                _ulongType,
-                                _module.AddInstruction(SpirvOp.UConvert, _ulongType, left),
-                                _module.AddInstruction(SpirvOp.UConvert, _ulongType, right));
-                            result = _module.AddInstruction(
-                                SpirvOp.UConvert,
-                                _uintType,
-                                ShiftRightLogical64(
-                                    product,
-                                    _module.Constant64(_ulongType, 32)));
+                            result = MultiplyExtended(left, right, signed: false).High;
                             break;
-                        }
                         case "SAndB32":
                             result = BitwiseAnd(left, right);
                             Store(_scc, IsNotZero(result));
@@ -3447,7 +3367,9 @@ public static partial class Gen5SpirvTranslator
             var left = GetRawSource64(instruction, 0);
             if (instruction.Opcode.EndsWith("SaveexecB64", StringComparison.Ordinal))
             {
-                var oldExec = BooleanToWaveMask(Load(_boolType, _exec));
+                var oldExec = _emulateWave64 && _subgroupInvocationIdInput != 0
+                    ? LoadS64(126)
+                    : BooleanToWaveMask(Load(_boolType, _exec));
                 var notLeft = _module.AddInstruction(SpirvOp.Not, _ulongType, left);
                 var newExec = instruction.Opcode switch
                 {
@@ -3820,14 +3742,14 @@ public static partial class Gen5SpirvTranslator
                     _module.AddInstruction(
                         SpirvOp.Select,
                         _uintType,
-                        LogicalNot(SubgroupAny(Load(_boolType, _vcc))),
+                        LogicalNot(WaveMaskAny(106, _vcc)),
                         UInt(1),
                         UInt(0)),
                 Gen5OperandKind.EncodedConstant when operand.Value == 252 =>
                     _module.AddInstruction(
                         SpirvOp.Select,
                         _uintType,
-                        LogicalNot(SubgroupAny(Load(_boolType, _exec))),
+                        LogicalNot(WaveMaskAny(126, _exec)),
                         UInt(1),
                         UInt(0)),
                 Gen5OperandKind.EncodedConstant when operand.Value == 253 =>
@@ -4877,76 +4799,48 @@ public static partial class Gen5SpirvTranslator
 
         // An emulated wave64 spans two host subgroups, so a subgroup broadcast cannot reach
         // the other half. The selected guest lane publishes through workgroup scratch, like
-        // BroadcastFirstWave64Active; the trailing barrier keeps the next use from racing.
-        private uint BroadcastWave64Lane(uint value, uint lane)
-        {
-            EmitConditional(
-                _module.AddInstruction(SpirvOp.IEqual, _boolType, GuestWaveLane(), lane),
-                () => Store(WaveBroadcastScratchPointer(), value));
-            EmitWave64Barrier();
-            var result = Load(_uintType, WaveBroadcastScratchPointer());
-            EmitWave64Barrier();
-            return result;
-        }
+        // BroadcastFirstWave64Active.
+        private uint BroadcastWave64Lane(uint value, uint lane) =>
+            ExchangeWave64Value(_module.AddInstruction(SpirvOp.IEqual, _boolType, GuestWaveLane(), lane), value);
 
         private uint BroadcastFirstWave64Active(uint value)
         {
             var lane = GuestWaveLane();
-            EmitConditional(
-                _module.AddInstruction(
-                    SpirvOp.IEqual,
-                    _boolType,
-                    lane,
-                    UInt(0)),
-                () => Store(WaveBroadcastScratchPointer(), UInt(0)));
-            EmitWave64Barrier();
-
-            var activeMask = BooleanToWaveMask(Load(_boolType, _exec));
-            var lowMask = _module.AddInstruction(
-                SpirvOp.UConvert,
-                _uintType,
-                activeMask);
-            var highMask = _module.AddInstruction(
-                SpirvOp.UConvert,
-                _uintType,
-                ShiftRightLogical64(
-                    activeMask,
-                    _module.Constant64(_ulongType, 32)));
-            var hasLow = IsNotZero(lowMask);
-            var hasHigh = IsNotZero(highMask);
-            var firstLow = Ext(73, _uintType, lowMask);
-            var firstHigh = IAdd(UInt(32), Ext(73, _uintType, highMask));
-            var firstLane = _module.AddInstruction(
+            var upperHalf = ShiftRightLogical(lane, UInt(5));
+            var activeInHalf = OwnHalfBallot(Load(_boolType, _exec));
+            var halfHasActive = IsNotZero(activeInHalf);
+            var firstInHalf = _module.AddInstruction(
                 SpirvOp.Select,
                 _uintType,
-                hasLow,
-                firstLow,
-                _module.AddInstruction(
-                    SpirvOp.Select,
-                    _uintType,
-                    hasHigh,
-                    firstHigh,
-                    UInt(0)));
-            var isFirst = _module.AddInstruction(
-                SpirvOp.IEqual,
-                _boolType,
-                lane,
-                firstLane);
-            EmitConditional(
-                _module.AddInstruction(
-                    SpirvOp.LogicalAnd,
-                    _boolType,
-                    isFirst,
-                    _module.AddInstruction(
-                        SpirvOp.LogicalOr,
-                        _boolType,
-                        hasLow,
-                        hasHigh)),
-                () => Store(WaveBroadcastScratchPointer(), value));
+                halfHasActive,
+                Ext(73, _uintType, activeInHalf),
+                UInt(0));
+            var halfBase = BitwiseAnd(Load(_uintType, _subgroupInvocationIdInput), UInt(~31u));
+            var halfValue = _module.AddInstruction(
+                SpirvOp.GroupNonUniformBroadcast,
+                _uintType,
+                UInt(3),
+                value,
+                IAdd(halfBase, firstInHalf));
+            var exchange = BeginWave64Exchange();
+            EmitConditional(IsHalfWaveLeader(lane), () =>
+            {
+                Store(Wave64ExchangePointer(exchange, upperHalf), halfValue);
+                Store(
+                    Wave64ExchangePointer(exchange, IAdd(UInt(2), upperHalf)),
+                    _module.AddInstruction(SpirvOp.Select, _uintType, halfHasActive, UInt(1), UInt(0)));
+            });
             EmitWave64Barrier();
-            var result = Load(_uintType, WaveBroadcastScratchPointer());
-            EmitWave64Barrier();
-            return result;
+            var lowerValue = Load(_uintType, Wave64ExchangePointer(exchange, UInt(0)));
+            var upperValue = Load(_uintType, Wave64ExchangePointer(exchange, UInt(1)));
+            var lowerActive = IsNotZero(Load(_uintType, Wave64ExchangePointer(exchange, UInt(2))));
+            var upperActive = IsNotZero(Load(_uintType, Wave64ExchangePointer(exchange, UInt(3))));
+            return _module.AddInstruction(
+                SpirvOp.Select,
+                _uintType,
+                _module.AddInstruction(SpirvOp.LogicalAnd, _boolType, LogicalNot(lowerActive), upperActive),
+                upperValue,
+                lowerValue);
         }
 
         private void StoreCarryOut(
@@ -4987,13 +4881,7 @@ public static partial class Gen5SpirvTranslator
             {
                 // The selected guest lane can belong to another host subgroup.
                 // Read it even when the guest execution mask disables that lane.
-                var isSelectedLane = _module.AddInstruction(
-                    SpirvOp.IEqual, _boolType, GuestWaveLane(), selectedLane);
-                EmitConditional(isSelectedLane, () => Store(WaveBroadcastScratchPointer(), sourceValue));
-                EmitWave64Barrier();
-                var broadcast = Load(_uintType, WaveBroadcastScratchPointer());
-                EmitWave64Barrier();
-                StoreS(destination, broadcast);
+                StoreS(destination, BroadcastWave64Lane(sourceValue, selectedLane));
             }
             else if (_subgroupInvocationIdInput != 0)
             {

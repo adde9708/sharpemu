@@ -236,6 +236,12 @@ internal static unsafe partial class VulkanVideoPresenter
         public ResourceSlotIdentifier FindImage(ref ImageRequest request, bool exactFormat)
         {
             _ = BeginBatchedGuestCommands();
+            if (request.Role == ImageRole.ColorTarget && request.Description.DccSliceSize is var sliceSize and not 0)
+            {
+                _imageCache.SynchronizeGuestDccMetadata(request.Description.Metadata.Range.Address, sliceSize,
+                    request.View.BaseLayer, request.View.LayerCount);
+            }
+
             return _imageCache.FindImage(ref request, exactFormat);
         }
 
@@ -534,8 +540,8 @@ internal static unsafe partial class VulkanVideoPresenter
         // A DCC fast clear stays pending until the surface binds as a color target. A shader that
         // samples or writes the surface first must see the cleared contents, and the later bind must
         // not clear over its writes: Astro Bot's save-slot cards were drawn by compute into a
-        // fast-cleared target, then wiped black by the deferred clear. Only the zero clear code is
-        // materialized here; the register clear color is known only when the surface is a target.
+        // fast-cleared target, then wiped black by the deferred clear. The register clear color is
+        // known only when the surface is a target.
         private void RecordSampledColorMetadataClears(TextureResource[] bindings)
         {
             const byte DccClearToZero = 0x00;
@@ -547,10 +553,17 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 var metadataAddress = image.Description.Metadata.Range.Address;
+                var sliceSize = image.Description.DccSliceSize;
+                var fixedClearSupported = ImageRequestBuilders.SupportsDccFixedClear(image.Description.PixelFormat);
                 var view = binding.Request.View;
                 for (var layer = view.BaseLayer; layer < view.BaseLayer + view.LayerCount; layer++)
                 {
-                    if (!_imageCache.IsMetadataCleared(metadataAddress, layer, out var metadataValue) || (byte)metadataValue != DccClearToZero)
+                    var tracked = _imageCache.IsMetadataCleared(metadataAddress, layer, out var metadataValue) && (byte)metadataValue == DccClearToZero;
+                    var clearValue = default(ClearColorValue);
+                    ulong guestSlice = 0;
+                    if (!tracked &&
+                        (sliceSize == 0 || !_imageCache.TryReadGuestDccClear(metadataAddress, sliceSize, layer, out guestSlice, out var code) ||
+                         !TryDecodeDccClear(code, false, fixedClearSupported, default, out clearValue)))
                     {
                         continue;
                     }
@@ -560,12 +573,26 @@ internal static unsafe partial class VulkanVideoPresenter
                     var range = new SubresourceRange(0, 1, layer, 1);
                     image.Transition(ImageLayout.TransferDstOptimal, AccessFlags.TransferWriteBit, range, command);
                     var vkRange = new ImageSubresourceRange(ImageAspectFlags.ColorBit, 0, 1, layer, 1);
-                    var clearValue = default(ClearColorValue);
                     _vk.CmdClearColorImage(command, image.Backing.Handle, ImageLayout.TransferDstOptimal, &clearValue, 1, &vkRange);
+                    if (!tracked)
+                    {
+                        _bufferCache.FillBuffer(guestSlice, sliceSize, uint.MaxValue, false);
+                        if (RenderTrace.Enabled && RenderTrace.MetadataClear())
+                        {
+                            RenderTrace.Write(
+                                $"Materialized a guest DCC clear on a sampled image: metadata=0x{metadataAddress:X16} layer={layer} " +
+                                $"slice=0x{sliceSize:X} format={image.Description.PixelFormat}");
+                        }
+
+                        continue;
+                    }
+
                     if (!_imageCache.SetMetadataSlice(metadataAddress, layer, false))
                     {
                         throw SubmissionScheduler.Fatal($"The DCC clear state could not be consumed: metadata=0x{metadataAddress:X16} layer={layer}.");
                     }
+
+                    ConsumeGuestDccClears(image.Description, layer, 1);
                 }
             }
         }

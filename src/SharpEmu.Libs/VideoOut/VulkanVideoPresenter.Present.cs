@@ -37,6 +37,8 @@ internal static unsafe partial class VulkanVideoPresenter
     private static uint _windowHeight;
     private static bool _closed;
     private static bool _presenterCloseRequested;
+    private static bool _hdrCapabilitiesReady;
+    private static bool _hdrOutputSupported;
 
     private static bool _splashHidden;
 
@@ -121,7 +123,27 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _videoOptions = options.Normalize();
+            _hdrCapabilitiesReady = false;
+            _hdrOutputSupported = false;
             return true;
+        }
+    }
+
+    internal static bool QueryHdrOutputSupport()
+    {
+        // The guest can query HDR before registering its first display buffer.
+        EnsureStarted((uint)_videoOptions.Width, (uint)_videoOptions.Height);
+        lock (_gate)
+        {
+            while (!_hdrCapabilitiesReady && !_closed && _presenterStartupFailure is null &&
+                   !HostSessionControl.IsShutdownRequested && !Volatile.Read(ref _presenterCloseRequested))
+            {
+                System.Threading.Monitor.Wait(_gate);
+            }
+
+            return _hdrCapabilitiesReady && !_closed && _presenterStartupFailure is null &&
+                   !HostSessionControl.IsShutdownRequested && !Volatile.Read(ref _presenterCloseRequested) &&
+                   _hdrOutputSupported;
         }
     }
 

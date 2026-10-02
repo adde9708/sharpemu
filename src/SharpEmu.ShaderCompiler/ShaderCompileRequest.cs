@@ -186,6 +186,7 @@ public sealed class ShaderCompileRequest
     public uint LocalSizeX { get; init; } = 1;
     public uint LocalSizeY { get; init; } = 1;
     public uint LocalSizeZ { get; init; } = 1;
+    public uint LocalDataShareDwords { get; init; }
 
     // Fixed bounds for standalone modules; runtime-limit layouts read the dispatch data.
     public uint ThreadCountX { get; init; } = UnboundedThreadCount;

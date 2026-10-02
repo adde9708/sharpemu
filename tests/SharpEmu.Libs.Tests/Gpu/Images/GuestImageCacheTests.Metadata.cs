@@ -157,6 +157,36 @@ public sealed partial class GuestImageCacheTests
     }
 
     [Fact]
+    public void GuestDccClear_ReadsOnlyUniformClearSlices()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const ulong SliceSize = 0x2000;
+        var metadata = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(metadata, Enumerable.Repeat((byte)0x80, (int)SliceSize).ToArray());
+        harness.Write(metadata + SliceSize, Enumerable.Repeat((byte)0x00, (int)SliceSize).ToArray());
+        var mixed = Enumerable.Repeat((byte)0x40, (int)SliceSize).ToArray();
+        mixed[^1] = 0xff;
+        harness.Write(metadata + 2 * SliceSize, mixed);
+        harness.Write(metadata + 3 * SliceSize, Enumerable.Repeat((byte)0xff, (int)SliceSize).ToArray());
+
+        Assert.True(harness.Images.TryReadGuestDccClear(metadata, SliceSize, 0, out var slice, out var code));
+        Assert.Equal(metadata, slice);
+        Assert.Equal(0x80, code);
+        Assert.True(harness.Images.TryReadGuestDccClear(metadata, SliceSize, 1, out slice, out code));
+        Assert.Equal(metadata + SliceSize, slice);
+        Assert.Equal(0x00, code);
+        Assert.False(harness.Images.TryReadGuestDccClear(metadata, SliceSize, 2, out _, out _));
+        Assert.False(harness.Images.TryReadGuestDccClear(metadata, SliceSize, 3, out _, out _));
+        Assert.False(harness.Images.TryReadGuestDccClear(metadata, 0, 0, out _, out _));
+
+        harness.Worker.Run(() => harness.Cache.FillBuffer(metadata, SliceSize, uint.MaxValue, isGds: false));
+        Assert.False(harness.Images.TryReadGuestDccClear(metadata, SliceSize, 0, out _, out _));
+        Assert.True(harness.Images.TryReadGuestDccClear(metadata, SliceSize, 1, out _, out _));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void Unregister_DropsMetadataInTheRange()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;

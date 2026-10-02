@@ -63,9 +63,9 @@ Our goal is **not** to emulate PS4 games, as there is already an excellent emula
 | :------------------------------------------------------------------------: | :------------------------------------------------------------------: |
 | ![Hades](./.github/images/hades.jpg) | ![Dead Cells](./.github/images/dead-cells.jpg) |
 
-|                  PAC-MAN World Re-PAC                    |                 Cult of the Lamb                    |
+|                  PAC-MAN World Re-PAC                    |                 Astro Bot                    |
 | :------------------------------------------------------------------------: | :------------------------------------------------------------------: |
-| ![Pac-Man](./.github/images/pac-man-world-re-pac.jpg) | ![Cult of the Lamb](./.github/images/cult-of-the-lamb.jpg) |
+| ![Pac-Man](./.github/images/pac-man-world-re-pac.jpg) | ![Astro Bot](./.github/images/astro-bot.jpg) |
 
 ## Status
 

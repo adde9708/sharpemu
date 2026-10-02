@@ -55,9 +55,9 @@ public sealed class PerformanceProfileSettingsTests
     public void GameProfileChoiceSurvivesReloadWithoutChangingGlobalSettings(string variable, bool globalEnabled, bool gameEnabled)
     {
         var global = new GuiSettings();
+        var game = new PerGameSettings { EnvironmentToggles = [.. global.EnvironmentToggles] };
         if (globalEnabled)
             global.EnvironmentToggles.Add(variable);
-        var game = new PerGameSettings { EnvironmentToggles = ["SHARPEMU_WRITABLE_APP0"] };
         if (gameEnabled)
             game.EnvironmentToggles.Add(variable);
 

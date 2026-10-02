@@ -237,7 +237,7 @@
   "Options.Hdr.Desc": "HDR használata, ha a kiválasztott kijelző és grafikus backend támogatja. Az automatikus mód SDR-re vált vissza.",
   "Options.Hdr.Auto": "Automatikus",
   "Options.Env.BinkPlayback.Label": "Bink videólejátszás",
-  "Options.Env.BinkPlayback.Desc": "A Host az FFmpeg hídon keresztül játssza le a Bink videókat, de egyes játékoknál problémák jelentkezhetnek.\nA Guest a játékmotor saját dekóderét használja, amelyet a SharpEmu jelenleg csak részben támogat.\nA Skip kihagyja a Bink videókat, ami megkönnyítheti a fejlesztést.",
+  "Options.Env.BinkPlayback.Desc": "A Host az FFmpeg hídon keresztül játssza le a Bink videókat, de egyes játékoknál problémák jelentkezhetnek.\nA Guest a játékmotor saját dekóderét használja.\nA Skip kihagyja a Bink videókat, ami megkönnyítheti a fejlesztést.",
   "Options.Env.BinkPlayback.Host": "Host (FFmpeg)",
   "Options.Env.BinkPlayback.Guest": "Guest",
   "Options.Env.BinkPlayback.Skip": "Kihagyás"

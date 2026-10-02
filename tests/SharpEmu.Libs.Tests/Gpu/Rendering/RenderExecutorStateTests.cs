@@ -339,6 +339,19 @@ public sealed class RenderExecutorStateTests : IDisposable
     }
 
     [Fact]
+    public void Attachments_AColorTargetWithoutAnActivePixelShaderIsDroppedFromTheDepthPass()
+    {
+        var banks = Banks(withDepth: true);
+        banks.Context.ColorTargets[0] = RegisterWords.Color(ColorBase, 32, 32);
+        banks.Context.ShaderInterface.ColorShaderMask = 0;
+        _executor.DrawIndexed(1, banks, Indexed(3));
+
+        var rendering = _host.BegunRenderings[0];
+        Assert.Equal((0u, 64u, 64u), (rendering.ColorAttachmentCount, rendering.Width, rendering.Height));
+        Assert.Contains("create_graphics_pipeline colors=0 depth=True topology=TriangleList restart=False", _pipelines.Calls);
+    }
+
+    [Fact]
     public void Attachments_StencilFormatIsReportedOnlyWithAStencilAspect()
     {
         var banks = Banks(withDepth: true);

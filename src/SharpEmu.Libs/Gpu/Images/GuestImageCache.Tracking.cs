@@ -424,7 +424,7 @@ public sealed partial class GuestImageCache
         foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true))
         {
             var owner = _slots.TryGet(imageIdentifier);
-            if (owner == null || owner.DepthOwner.IsValid)
+            if (owner == null)
             {
                 continue;
             }
@@ -467,7 +467,7 @@ public sealed partial class GuestImageCache
         foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true))
         {
             var image = _slots[imageIdentifier];
-            if (image.DepthOwner.IsValid || !image.Overlaps(address, size))
+            if (!image.Overlaps(address, size))
             {
                 continue;
             }
@@ -496,14 +496,9 @@ public sealed partial class GuestImageCache
         foreach (var imageIdentifier in FindImagesInRange(address, size, pageOverlap: true))
         {
             var image = _slots[imageIdentifier];
-            if (image.DepthOwner.IsValid)
-            {
-                continue;
-            }
-
             imagePages = true;
             imageBytes |= image.Overlaps(address, size);
-            gpuImageBytes |= image.GpuOverlaps(address, size);
+            gpuImageBytes |= !image.DepthOwner.IsValid && image.GpuOverlaps(address, size);
         }
 
         return new ImageRegionInfo(imagePages, imageBytes, gpuImageBytes);

@@ -102,7 +102,7 @@
   "Options.Hdr.Desc": "Kasuta HDR-i, kui valitud kuvar ja graafikaliides seda toetavad. Automaatrežiim lülitub tagasi SDR-ile.",
   "Options.Hdr.Auto": "Automaatne",
   "Options.Env.BinkPlayback.Label": "Bink-video taasesitus",
-  "Options.Env.BinkPlayback.Desc": "Host esitab Bink-videoid FFmpegi silla kaudu, kuid mõnes mängus võib esineda probleeme.\nGuest kasutab mängumootori enda dekoodrit, mida SharpEmu praegu ainult osaliselt toetab.\nSkip jätab Bink-videod vahele, mis võib arendust lihtsustada.",
+  "Options.Env.BinkPlayback.Desc": "Host esitab Bink-videoid FFmpegi silla kaudu, kuid mõnes mängus võib esineda probleeme.\nGuest kasutab mängumootori enda dekoodrit.\nSkip jätab Bink-videod vahele, mis võib arendust lihtsustada.",
   "Options.Env.BinkPlayback.Host": "Host (FFmpeg)",
   "Options.Env.BinkPlayback.Guest": "Guest",
   "Options.Env.BinkPlayback.Skip": "Jäta vahele",

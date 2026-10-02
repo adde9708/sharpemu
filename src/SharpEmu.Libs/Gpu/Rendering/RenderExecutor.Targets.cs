@@ -184,7 +184,7 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        var exportMasks = pixelProgram?.PixelColorExportMasks ?? uint.MaxValue;
+        var exportMasks = pixelProgram?.PixelColorExportMasks ?? 0u;
         var kept = 0u;
         for (var i = 0; i < state.ColorCount; i++)
         {

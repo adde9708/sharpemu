@@ -80,6 +80,8 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var hdrState = _window.HdrState;
+            _ = ChooseSurfaceFormat(formats, requestHdr: true, out var surfaceSupportsHdr);
+            var hdrOutputSupported = _videoOptions.CanUseHdr(hdrState.Enabled, surfaceSupportsHdr);
             var guestHdrRequested = VideoOutExports.IsHdrOutputRequested;
             var requestHdr = _videoOptions.HdrMode switch
             {
@@ -140,13 +142,21 @@ internal static unsafe partial class VulkanVideoPresenter
             _imageInitialized = new bool[swapchainImageCount];
             Console.Error.WriteLine(
                 $"[LOADER][INFO] Vulkan output color: requested={_videoOptions.HdrMode} " +
-                $"display_hdr={hdrState.Enabled} guest_hdr={guestHdrRequested} active={_hdrOutputActive} " +
+                $"display_hdr={hdrState.Enabled} guest_hdr_supported={hdrOutputSupported} " +
+                $"guest_hdr={guestHdrRequested} active={_hdrOutputActive} " +
                 $"format={_swapchainFormat} colorspace={_swapchainColorSpace} " +
                 $"sdr_white={_hdrSdrWhiteLevel:F3} headroom={_hdrHeadroom:F3}");
             if (requestHdr && !_hdrOutputActive)
             {
                 Console.Error.WriteLine(
                     "[LOADER][WARN] HDR output requested but the Vulkan surface exposes no scRGB format; using SDR.");
+            }
+
+            lock (_gate)
+            {
+                _hdrOutputSupported = hdrOutputSupported;
+                _hdrCapabilitiesReady = true;
+                System.Threading.Monitor.PulseAll(_gate);
             }
         }
 
