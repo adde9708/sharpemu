@@ -7845,6 +7845,13 @@ public static partial class Gen5SpirvTranslator
             _module.AddLabel(mergeLabel);
         }
 
+        // Each predicate is a pure function of the request, and the context compiles one request,
+        // so a shader walked by five call sites only pays for the scan once.
+        private bool? _usesSubgroupShuffle;
+        private bool? _usesSubgroupBroadcast;
+        private bool? _usesWaveControl;
+        private bool? _usesSubgroupOperations;
+
         private bool UsesLds() =>
             _request.Program.Instructions.Any(instruction =>
                 instruction.Control is Gen5DataShareControl) ||
@@ -7852,17 +7859,17 @@ public static partial class Gen5SpirvTranslator
                 memory.AddressSpace is FlatAddressSpace.Shared or FlatAddressSpace.SharedOrPrivate);
 
         private bool UsesSubgroupShuffle() =>
-            _request.Program.Instructions.Any(instruction =>
+            _usesSubgroupShuffle ??= _request.Program.Instructions.Any(instruction =>
                 instruction.Control is Gen5DppControl or Gen5Dpp8Control ||
                 instruction.Opcode is "VPermlane16B32" or "VPermlanex16B32" or "VReadlaneB32" or
                     "DsAppend" or "DsConsume" or "DsSwizzleB32" or "DsBpermuteB32");
 
         private bool UsesSubgroupBroadcast() =>
-            _request.Program.Instructions.Any(instruction =>
+            _usesSubgroupBroadcast ??= _request.Program.Instructions.Any(instruction =>
                 instruction.Opcode == "VReadfirstlaneB32");
 
         private bool UsesWaveControl() =>
-            _request.Program.Instructions.Any(instruction =>
+            _usesWaveControl ??= _request.Program.Instructions.Any(instruction =>
                 instruction.Opcode.Contains("Saveexec", StringComparison.Ordinal) ||
                 instruction.Opcode.StartsWith("SCbranchExec", StringComparison.Ordinal) ||
                 instruction.Opcode.StartsWith("SCbranchVcc", StringComparison.Ordinal) ||
@@ -7871,6 +7878,7 @@ public static partial class Gen5SpirvTranslator
                 instruction.Destinations.Any(IsWaveMaskOperand));
 
         private bool UsesSubgroupOperations() =>
+            _usesSubgroupOperations ??=
             _enableGraphicsSubgroupOperations &&
             (UsesSubgroupShuffle() ||
              UsesSubgroupBroadcast() ||
