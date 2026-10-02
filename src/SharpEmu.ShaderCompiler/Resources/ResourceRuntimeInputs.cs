@@ -22,6 +22,11 @@ public sealed class ResourceRuntimeInputs
     // wrapper can tell the words only the table reads from those the descriptors depend on.
     public Action<bool>? TablePhase { get; init; }
 
+    // Told with the index of every user-data word the plan actually evaluates. User data is read
+    // straight out of UserData rather than through a word reader, so a reader wrapper cannot see
+    // it; this is the only place that consumption can be observed.
+    public Action<int>? UserDataRead { get; init; }
+
     public ResourceRuntimeInputs WithReader(GuestWordReader? reader) => new()
     {
         UserData = UserData,
@@ -30,6 +35,7 @@ public sealed class ResourceRuntimeInputs
         ReadCleanMemory = ReadCleanMemory,
         ComputeState = ComputeState,
         TablePhase = TablePhase,
+        UserDataRead = UserDataRead,
     };
 }
 

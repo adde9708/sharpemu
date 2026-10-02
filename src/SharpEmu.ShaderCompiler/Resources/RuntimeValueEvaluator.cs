@@ -127,7 +127,9 @@ public sealed class RuntimeValueEvaluator
                     return false;
                 }
 
-                result = _inputs.UserData[(int)(register - _plan.UserDataBase)];
+                var userIndex = (int)(register - _plan.UserDataBase);
+                result = _inputs.UserData[userIndex];
+                _inputs.UserDataRead?.Invoke(userIndex);
                 return true;
             }
             case ScalarValueKind.ShaderBase:

@@ -165,11 +165,15 @@ public sealed class ResourceMaterializationCacheTests
 
     // Reads the four constants of FlattenedReadReuseTests.RepeatedReadProgram from a word memory.
     private static bool RunTable(ResourceMaterializationCache cache, ShaderResourcePlan plan, TestWordMemory memory,
-        out ResourceSnapshot snapshot)
+        out ResourceSnapshot snapshot) =>
+        RunTable(cache, plan, memory, TableUserData, out snapshot);
+
+    private static bool RunTable(ResourceMaterializationCache cache, ShaderResourcePlan plan, TestWordMemory memory,
+        uint[] userData, out ResourceSnapshot snapshot)
     {
         snapshot = new ResourceSnapshot();
         var specialization = new ResourceSpecialization();
-        return cache.Materialize(plan, Inputs(TableUserData, memory.Read, memory.Read), (address, destination, _) =>
+        return cache.Materialize(plan, Inputs(userData, memory.Read, memory.Read), (address, destination, _) =>
         {
             for (var offset = 0; offset < destination.Length; offset += 4)
             {
@@ -205,6 +209,77 @@ public sealed class ResourceMaterializationCacheTests
         Assert.True(RunTable(cache, plan, memory, out var third));
         Assert.Same(second, third);
         Assert.Equal((1, 1, 1), (cache.Hits, cache.Misses, cache.TableRefreshes));
+    }
+
+    [Fact]
+    public void AnUnreadUserDataWordReusesTheMaterializationAndBindsThisDrawsWords()
+    {
+        var (plan, _, _) = Prepare(FlattenedReadReuseTests.RepeatedReadProgram(4), userDataCount: 9);
+        var memory = new TestWordMemory { Words = [11, 22, 33, 44] };
+        var cache = new ResourceMaterializationCache();
+        Assert.True(RunTable(cache, plan, memory, [0x1000, 0, 0, 0, 0, 0, 0, 0, 0], out var first));
+
+        // The program reads s[0:1] for the table pointer and s[4:8] for the store's buffer
+        // handle, so s[8] is the one push constant a changed draw can alter for free.
+        Assert.True(RunTable(cache, plan, memory, [0x1000, 0, 0, 0, 0, 0, 0, 0, 0xABCD], out var second));
+        Assert.Equal((1, 1), (cache.Hits, cache.Misses));
+        Assert.Same(first.FlattenedResourceTable, second.FlattenedResourceTable);
+
+        // The descriptor words are reused, but the user data is this draw's: both backends
+        // build shaderData from it, so the entry's own copy would push stale push constants.
+        Assert.Equal(0xABCDu, second.UserData[8]);
+        Assert.NotSame(first.UserData, second.UserData);
+    }
+
+    [Fact]
+    public void AChangedReadUserDataWordMaterializesAgain()
+    {
+        var (plan, _, _) = Prepare(FlattenedReadReuseTests.RepeatedReadProgram(4), userDataCount: 9);
+        var memory = new TestWordMemory { Words = [11, 22, 33, 44, 55, 66, 77, 88] };
+        var cache = new ResourceMaterializationCache();
+        Assert.True(RunTable(cache, plan, memory, [0x1000, 0, 0, 0, 0, 0, 0, 0, 0], out var first));
+
+        // s[0] is the table pointer, so moving it must not reuse the entry.
+        Assert.True(RunTable(cache, plan, memory, [0x1010, 0, 0, 0, 0, 0, 0, 0, 0], out var second));
+        Assert.Equal((0, 2), (cache.Hits, cache.Misses));
+        Assert.Equal([55u, 66, 77, 88], second.FlattenedResourceTable);
+        Assert.NotSame(first, second);
+    }
+
+    [Fact]
+    public void AChangedBufferHandleWordMaterializesAgain()
+    {
+        var (plan, _, _) = Prepare(FlattenedReadReuseTests.RepeatedReadProgram(4), userDataCount: 9);
+        var memory = new TestWordMemory { Words = [11, 22, 33, 44] };
+        var cache = new ResourceMaterializationCache();
+        Assert.True(RunTable(cache, plan, memory, [0x1000, 0, 0, 0, 0, 0, 0, 0, 0], out _));
+
+        // s[5] is inside the store's buffer handle, which the descriptor walk reads even though
+        // the flattened table never mentions it.
+        Assert.True(RunTable(cache, plan, memory, [0x1000, 0, 0, 0, 0, 1, 0, 0, 0], out _));
+        Assert.Equal(0, cache.Hits);
+    }
+
+    [Fact]
+    public void AlternatingTablePointersKeepBothSignatures()
+    {
+        var (plan, _, _) = Prepare(FlattenedReadReuseTests.RepeatedReadProgram(4), userDataCount: 9);
+        var memory = new TestWordMemory { Words = [11, 22, 33, 44, 55, 66, 77, 88] };
+        var cache = new ResourceMaterializationCache();
+        var first = new uint[] { 0x1000, 0, 0, 0, 0, 0, 0, 0, 0 };
+        var second = new uint[] { 0x1010, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+        Assert.True(RunTable(cache, plan, memory, first, out _));
+        Assert.True(RunTable(cache, plan, memory, second, out _));
+        Assert.Equal(2, cache.Misses);
+
+        // Each draw must find its own signature again rather than evicting the other.
+        Assert.True(RunTable(cache, plan, memory, first, out var firstAgain));
+        Assert.True(RunTable(cache, plan, memory, second, out var secondAgain));
+        Assert.Equal(2, cache.Hits);
+        Assert.Equal(2, cache.Misses);
+        Assert.Equal([11u, 22, 33, 44], firstAgain.FlattenedResourceTable);
+        Assert.Equal([55u, 66, 77, 88], secondAgain.FlattenedResourceTable);
     }
 
     [Fact]

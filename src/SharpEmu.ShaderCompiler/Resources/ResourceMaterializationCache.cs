@@ -17,11 +17,16 @@ public delegate bool ResidentGuestBytesReader(ulong address, Span<byte> destinat
 // GPU-owned range and any byte difference make the entry miss; nothing is guessed.
 public sealed class ResourceMaterializationCache(int generationCapacity = 16384)
 {
+    // One key covers a plan and its shader base; the entry list holds the recent user-data
+    // signatures seen under it, so alternating draws keep their own entry instead of evicting
+    // each other.
+    private const int MaxSignaturesPerKey = 8;
+
     // Two generations approximate LRU: a full young generation becomes the old one,
     // and an old entry that is used again is promoted back.
     private readonly int _generationCapacity = Math.Max(1, generationCapacity);
-    private Dictionary<ulong, Entry> _young = new();
-    private Dictionary<ulong, Entry> _old = new();
+    private Dictionary<ulong, List<Entry>> _young = new();
+    private Dictionary<ulong, List<Entry>> _old = new();
     private byte[] _scratch = new byte[256];
     // Full-entry layout: every recorded range written at its own offset, so a rejected
     // validation is already in the shape the table refresh needs and the guest is not read twice.
@@ -64,7 +69,7 @@ public sealed class ResourceMaterializationCache(int generationCapacity = 16384)
             {
                 Hits++;
                 Interlocked.Increment(ref _totalHits);
-                snapshot = cached.Snapshot;
+                snapshot = Rebind(cached.Snapshot, inputs);
                 specialization = cached.Specialization;
                 failure = default;
                 return true;
@@ -74,7 +79,7 @@ public sealed class ResourceMaterializationCache(int generationCapacity = 16384)
             {
                 TableRefreshes++;
                 Interlocked.Increment(ref _totalTableRefreshes);
-                snapshot = refreshed.Snapshot;
+                snapshot = Rebind(refreshed.Snapshot, inputs);
                 specialization = refreshed.Specialization;
                 failure = default;
                 return true;
@@ -92,6 +97,7 @@ public sealed class ResourceMaterializationCache(int generationCapacity = 16384)
             ReadCleanMemory = recorder.Wrap(inputs.ReadCleanMemory, clean: true),
             ComputeState = inputs.ComputeState,
             TablePhase = recorder.SetTablePhase,
+            UserDataRead = recorder.RecordUserData,
         };
         if (!ResourceMaterializer.Materialize(plan, recording, ref snapshot, ref specialization, out failure))
             return false;
@@ -118,6 +124,11 @@ public sealed class ResourceMaterializationCache(int generationCapacity = 16384)
     {
         refreshed = null!;
         if (!cached.TableRefreshable)
+            return false;
+
+        // The refresh only re-evaluates the flattened table, so it is defined for a draw whose
+        // user data still matches; a draw that changed one of these words needs a full walk.
+        if (!cached.UserDataHolds(inputs))
             return false;
 
         if (_current.Length < cached.Bytes.Length)
@@ -179,7 +190,8 @@ public sealed class ResourceMaterializationCache(int generationCapacity = 16384)
         refreshed = new Entry
         {
             Plan = cached.Plan,
-            UserData = cached.UserData,
+            UserDataIndices = cached.UserDataIndices,
+            UserDataWords = cached.UserDataWords,
             ShaderBase = cached.ShaderBase,
             ComputeState = cached.ComputeState,
             RangeAddresses = cached.RangeAddresses,
@@ -236,31 +248,101 @@ public sealed class ResourceMaterializationCache(int generationCapacity = 16384)
 
     private static ulong KeyOf(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
     {
+        // User data is deliberately not hashed: it varies per draw, and an entry records which of
+        // its words the plan read.
+        var planHash = RuntimeHelpers.GetHashCode(plan);
         var hash = new HashCode();
-        hash.Add(RuntimeHelpers.GetHashCode(plan));
+        hash.Add(planHash);
         hash.Add(inputs.ShaderBase);
         hash.Add(inputs.ComputeState);
-        var userData = inputs.UserData;
-        hash.Add(userData.Count);
-        for (var index = 0; index < userData.Count; index++)
-            hash.Add(userData[index]);
         var low = (uint)hash.ToHashCode();
-        // A second, independent mix keeps accidental collisions out of the 64-bit key.
+        // A second, independent mix of the same identity keeps accidental collisions out of the
+        // 64-bit key, which the user data no longer contributes to.
         var high = 0x9E3779B9u;
-        for (var index = 0; index < userData.Count; index++)
-            high = (high ^ userData[index]) * 0x01000193u;
+        high = (high ^ (uint)planHash) * 0x01000193u;
+        high = (high ^ (uint)(inputs.ShaderBase >> 32)) * 0x01000193u;
+        high = (high ^ (uint)inputs.ShaderBase) * 0x01000193u;
+        high = (high ^ (uint)(inputs.ComputeState?.GetHashCode() ?? 0)) * 0x01000193u;
         return ((ulong)high << 32) | low;
+    }
+
+    // A hit reuses the descriptor words, the flattened table and the specialization, but the
+    // user data is the current draw's: both backends build the shaderData block from it, so
+    // handing back the entry's copy would push the earlier draw's push constants. When every
+    // word still matches, the entry's snapshot is already that draw's and is handed back as is.
+    private static ResourceSnapshot Rebind(ResourceSnapshot cached, ResourceRuntimeInputs inputs)
+    {
+        var cachedUserData = cached.UserData;
+        var userData = inputs.UserData;
+        if (cachedUserData.Length == userData.Count)
+        {
+            var identical = true;
+            for (var index = 0; index < cachedUserData.Length; index++)
+            {
+                if (cachedUserData[index] != userData[index])
+                {
+                    identical = false;
+                    break;
+                }
+            }
+
+            if (identical)
+                return cached;
+        }
+
+        return new ResourceSnapshot
+        {
+            Buffers = cached.Buffers,
+            Images = cached.Images,
+            Samplers = cached.Samplers,
+            FlattenedResourceTable = cached.FlattenedResourceTable,
+            UserData = userData as uint[] ?? userData.ToArray(),
+            DeviceAddressRanges = cached.DeviceAddressRanges,
+        };
     }
 
     private bool TryFind(ulong key, ShaderResourcePlan plan, ResourceRuntimeInputs inputs, out Entry entry)
     {
-        if (_young.TryGetValue(key, out entry!))
-            return entry.Matches(plan, inputs);
-        if (!_old.TryGetValue(key, out entry!) || !entry.Matches(plan, inputs))
+        entry = null!;
+        if (!_young.TryGetValue(key, out var young))
+            return Promote(key, plan, inputs, out entry);
+
+        var found = IndexOfMatching(young, plan, inputs);
+        if (found < 0)
+            return Promote(key, plan, inputs, out entry);
+
+        entry = young[found];
+        young.RemoveAt(found);
+        young.Insert(0, entry);
+        return true;
+    }
+
+    private bool Promote(ulong key, ShaderResourcePlan plan, ResourceRuntimeInputs inputs, out Entry entry)
+    {
+        entry = null!;
+        if (!_old.TryGetValue(key, out var old))
             return false;
+
+        var found = IndexOfMatching(old, plan, inputs);
+        if (found < 0)
+            return false;
+
+        entry = old[found];
+        old.RemoveAt(found);
         _old.Remove(key);
         Store(key, entry);
         return true;
+    }
+
+    private static int IndexOfMatching(List<Entry> entries, ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
+    {
+        for (var index = 0; index < entries.Count; index++)
+        {
+            if (entries[index].Matches(plan, inputs))
+                return index;
+        }
+
+        return -1;
     }
 
     private void Store(ulong key, Entry entry)
@@ -268,10 +350,34 @@ public sealed class ResourceMaterializationCache(int generationCapacity = 16384)
         if (_young.Count >= _generationCapacity && !_young.ContainsKey(key))
         {
             _old = _young;
-            _young = new Dictionary<ulong, Entry>(_generationCapacity);
+            _young = new Dictionary<ulong, List<Entry>>(_generationCapacity);
         }
 
-        _young[key] = entry;
+        if (!_young.TryGetValue(key, out var entries))
+        {
+            entries = [];
+            _young[key] = entries;
+        }
+
+        // A signature already held is replaced rather than duplicated, so a draw that
+        // alternates between a few push-data blocks does not fill the list with copies.
+        var existing = IndexOfSignature(entries, entry);
+        if (existing >= 0)
+            entries.RemoveAt(existing);
+        entries.Insert(0, entry);
+        if (entries.Count > MaxSignaturesPerKey)
+            entries.RemoveAt(entries.Count - 1);
+    }
+
+    private static int IndexOfSignature(List<Entry> entries, Entry entry)
+    {
+        for (var index = 0; index < entries.Count; index++)
+        {
+            if (entries[index].SameSignature(entry))
+                return index;
+        }
+
+        return -1;
     }
 
     private bool Validate(Entry entry, ResidentGuestBytesReader residentReader, bool capture, out bool captured)
@@ -314,7 +420,10 @@ public sealed class ResourceMaterializationCache(int generationCapacity = 16384)
     private sealed class Entry
     {
         public required ShaderResourcePlan Plan { get; init; }
-        public required uint[] UserData { get; init; }
+        // The user-data words this entry's materialization actually read, ascending by index.
+        // A draw whose other push constants changed still matches while these hold.
+        public required int[] UserDataIndices { get; init; }
+        public required uint[] UserDataWords { get; init; }
         public required ulong ShaderBase { get; init; }
         public required ComputeSelectorState? ComputeState { get; init; }
         public required ulong[] RangeAddresses { get; init; }
@@ -332,11 +441,36 @@ public sealed class ResourceMaterializationCache(int generationCapacity = 16384)
         public bool Matches(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
         {
             if (!ReferenceEquals(Plan, plan) || ShaderBase != inputs.ShaderBase ||
-                !Nullable.Equals(ComputeState, inputs.ComputeState) || UserData.Length != inputs.UserData.Count)
+                !Nullable.Equals(ComputeState, inputs.ComputeState))
                 return false;
-            for (var index = 0; index < UserData.Length; index++)
-                if (UserData[index] != inputs.UserData[index])
+            return UserDataHolds(inputs);
+        }
+
+        // The same push-data words, whether or not they still equal the current draw's.
+        public bool SameSignature(Entry other)
+        {
+            if (UserDataIndices.Length != other.UserDataIndices.Length)
+                return false;
+            for (var index = 0; index < UserDataIndices.Length; index++)
+            {
+                if (UserDataIndices[index] != other.UserDataIndices[index] ||
+                    UserDataWords[index] != other.UserDataWords[index])
                     return false;
+            }
+
+            return true;
+        }
+
+        public bool UserDataHolds(ResourceRuntimeInputs inputs)
+        {
+            var userData = inputs.UserData;
+            for (var index = 0; index < UserDataIndices.Length; index++)
+            {
+                var position = UserDataIndices[index];
+                if (position >= userData.Count || userData[position] != UserDataWords[index])
+                    return false;
+            }
+
             return true;
         }
     }
@@ -344,6 +478,7 @@ public sealed class ResourceMaterializationCache(int generationCapacity = 16384)
     private sealed class ReadRecorder
     {
         private readonly List<(ulong Address, uint Word, bool Clean, bool Table)> _reads = new();
+        private readonly SortedSet<int> _userData = new();
         private bool _inTable;
 
         public bool Failed { get; private set; }
@@ -351,6 +486,8 @@ public sealed class ResourceMaterializationCache(int generationCapacity = 16384)
         public List<(ulong Address, uint Word, bool Clean, bool Table)> Reads => _reads;
 
         public void SetTablePhase(bool inTable) => _inTable = inTable;
+
+        public void RecordUserData(int index) => _userData.Add(index);
 
         public GuestWordReader? Wrap(GuestWordReader? inner, bool clean)
         {
@@ -410,13 +547,16 @@ public sealed class ResourceMaterializationCache(int generationCapacity = 16384)
                 end = address + sizeof(uint);
             }
 
-            var userData = new uint[inputs.UserData.Count];
-            for (var index = 0; index < userData.Length; index++)
-                userData[index] = inputs.UserData[index];
+            var userDataIndices = new int[_userData.Count];
+            _userData.CopyTo(userDataIndices);
+            var userDataWords = new uint[userDataIndices.Length];
+            for (var index = 0; index < userDataIndices.Length; index++)
+                userDataWords[index] = inputs.UserData[userDataIndices[index]];
             return new Entry
             {
                 Plan = plan,
-                UserData = userData,
+                UserDataIndices = userDataIndices,
+                UserDataWords = userDataWords,
                 ShaderBase = inputs.ShaderBase,
                 ComputeState = inputs.ComputeState,
                 RangeAddresses = [.. addresses],
