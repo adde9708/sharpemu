@@ -54,6 +54,11 @@ internal static unsafe partial class VulkanVideoPresenter
         // Reading a mature driver cache can itself take several seconds. Keep the
         // render thread focused on pipeline warm-up; teardown still saves eagerly.
         private const long PipelineCacheCheckpointIntervalMs = 300_000;
+        private const long PipelineCacheRetryMs = 1_000;
+        private long _pipelineCacheRetryTick;
+        private const ulong MaxPipelineCacheBytes = 256UL * 1024 * 1024;
+        private HashSet<string>? _resetPipelineCachePaths;
+        private nuint _pipelineCacheSavedBytes;
         private Queue _queue;
         private uint _queueFamilyIndex;
 
@@ -87,6 +92,7 @@ internal static unsafe partial class VulkanVideoPresenter
             AttachGuestGpuMemory();
             Console.Error.WriteLine(
                 $"[LOADER][INFO] Vulkan VideoOut ready: {_extent.Width}x{_extent.Height}, format={_swapchainFormat}");
+            StartShaderPrewarm();
         }
 
         private static void WaitForRenderDocAttachIfRequested()
@@ -600,7 +606,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 subgroupSizeControl.MaxSubgroupSize >= RdnaSubgroupSize &&
                 (subgroupSizeControl.RequiredSubgroupSizeStages & ShaderStageFlags.ComputeBit) != 0;
             _maxComputeWorkgroupSubgroups = subgroupSizeControl.MaxComputeWorkgroupSubgroups;
-            _maxPushDescriptors = pushDescriptorProperties.MaxPushDescriptors;
+            // MoltenVK reports a zero OpArrayLength for storage buffers bound through push
+            // descriptors, which turns every bounds-checked load into zero and drops every store.
+            _maxPushDescriptors = Gpu.Vulkan.VulkanPushDescriptorPolicy.UsableCount(_vk, _physicalDevice, pushDescriptorProperties.MaxPushDescriptors);
             _noAttachmentSampleCounts = properties.Limits.FramebufferNoAttachmentsSampleCounts;
             _maxComputeWorkGroupCountX = properties.Limits.MaxComputeWorkGroupCount[0];
             _maxComputeWorkGroupCountY = properties.Limits.MaxComputeWorkGroupCount[1];
@@ -703,6 +711,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private const string FragmentShaderBarycentricExtensionName = "VK_KHR_fragment_shader_barycentric";
         private const string Maintenance5ExtensionName = "VK_KHR_maintenance5";
         private const string ImageViewMinLodExtensionName = "VK_EXT_image_view_min_lod";
+        private const string FillRectangleExtensionName = "VK_NV_fill_rectangle";
         private bool _supportsImageViewMinLod;
 
         private void CreateDevice()
@@ -733,6 +742,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _supportsIndependentBlend = supportedFeatures.IndependentBlend;
             _supportsDepthBiasClamp = supportedFeatures.DepthBiasClamp;
             _supportsDepthBounds = supportedFeatures.DepthBounds;
+            _supportsFillRectangle = IsDeviceExtensionAvailable(FillRectangleExtensionName);
             var enabledFeatures = new PhysicalDeviceFeatures
             {
                 DepthBounds = supportedFeatures.DepthBounds,
@@ -967,9 +977,10 @@ internal static unsafe partial class VulkanVideoPresenter
             var viewportIndexLayerExtension = (byte*)SilkMarshal.StringToPtr("VK_EXT_shader_viewport_index_layer");
             var maintenance5Extension = (byte*)SilkMarshal.StringToPtr(Maintenance5ExtensionName);
             var imageViewMinLodExtension = (byte*)SilkMarshal.StringToPtr(ImageViewMinLodExtensionName);
+            var fillRectangleExtension = (byte*)SilkMarshal.StringToPtr(FillRectangleExtensionName);
             try
             {
-                var extensions = stackalloc byte*[14];
+                var extensions = stackalloc byte*[15];
                 var extensionCount = 0u;
                 extensions[extensionCount++] = swapchainExtension;
                 extensions[extensionCount++] = pushDescriptorExtension;
@@ -1009,6 +1020,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 if (_supportsImageViewMinLod)
                 {
                     extensions[extensionCount++] = imageViewMinLodExtension;
+                }
+
+                if (_supportsFillRectangle)
+                {
+                    extensions[extensionCount++] = fillRectangleExtension;
                 }
 
                 if (supportsRobustness2)
@@ -1154,6 +1170,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 SilkMarshal.Free((nint)maintenance8Extension);
                 SilkMarshal.Free((nint)maintenance5Extension);
                 SilkMarshal.Free((nint)imageViewMinLodExtension);
+                SilkMarshal.Free((nint)fillRectangleExtension);
                 SilkMarshal.Free((nint)robustness2Extension);
                 SilkMarshal.Free((nint)portabilitySubsetExtension);
                 SilkMarshal.Free((nint)colorWriteEnableExtension);
@@ -1189,6 +1206,11 @@ internal static unsafe partial class VulkanVideoPresenter
         private void CreatePipelineCache()
         {
             var cacheMode = Environment.GetEnvironmentVariable("SHARPEMU_VK_PIPELINE_CACHE");
+            // MoltenVK imports compile every cached MSL library. Load shader
+            // groups on demand on macOS so a mature cache cannot hold startup
+            // behind unrelated scenes. Keep explicit overrides for comparison.
+            var shardMode = Environment.GetEnvironmentVariable("SHARPEMU_VK_PIPELINE_CACHE_SHARDS");
+            var useShards = shardMode == "1" || (shardMode is null && OperatingSystem.IsMacOS());
             // Vulkan cache blobs carry the implementation's compatibility
             // header and are rejected/rebuilt below when the device or driver
             // changes. MoltenVK compilation of a large translated shader can
@@ -1196,8 +1218,20 @@ internal static unsafe partial class VulkanVideoPresenter
             // much more harmful than using Vulkan's normal persistence path.
             // Keep an explicit opt-out for diagnostics and read-only systems.
             var persistentCacheEnabled =
-                !string.Equals(cacheMode, "0", StringComparison.Ordinal);
+                !string.Equals(cacheMode, "0", StringComparison.Ordinal) &&
+                (useShards || !OperatingSystem.IsWindows() || cacheMode is "1" or "file");
             _pipelineCachePath = persistentCacheEnabled ? GetPipelineCachePath() : null;
+            if (_pipelineCachePath is not null &&
+                useShards)
+            {
+                var singleFilePath = _pipelineCachePath;
+                _pipelineCacheShardDirectory = _pipelineCachePath + ".shards";
+                _pipelineCachePath = Path.Combine(_pipelineCacheShardDirectory, "present.bin");
+                if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("SHARPEMU_VK_PIPELINE_CACHE_PATH")))
+                {
+                    RemoveSingleFilePipelineCache(singleFilePath);
+                }
+            }
             byte[] initialData = [];
             try
             {
@@ -1234,6 +1268,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
+            if (initialData.Length != 0 && QueryPipelineCacheSize(_pipelineCache) is { } loadedBytes)
+            {
+                _pipelineCacheSavedBytes = loadedBytes;
+            }
+
             SetDebugName(
                 ObjectType.PipelineCache,
                 _pipelineCache.Handle,
@@ -1244,8 +1283,12 @@ internal static unsafe partial class VulkanVideoPresenter
             if (_pipelineCachePath is null)
             {
                 Console.Error.WriteLine(
-                    "[LOADER][INFO] Vulkan pipeline cache ready: memory-only " +
-                    "(persistence disabled with SHARPEMU_VK_PIPELINE_CACHE=0).");
+                    string.Equals(cacheMode, "0", StringComparison.Ordinal)
+                        ? "[LOADER][INFO] Vulkan pipeline cache ready: memory-only " +
+                          "(persistence disabled with SHARPEMU_VK_PIPELINE_CACHE=0)."
+                        : "[LOADER][INFO] Vulkan pipeline cache ready: memory-only " +
+                          "(the driver shader cache and the shader prewarm list replace the cache file; " +
+                          "SHARPEMU_VK_PIPELINE_CACHE=file keeps one).");
             }
             else
             {
@@ -1312,6 +1355,27 @@ internal static unsafe partial class VulkanVideoPresenter
             return cachePath;
         }
 
+        private static void RemoveSingleFilePipelineCache(string path)
+        {
+            try
+            {
+                if (!File.Exists(path))
+                {
+                    return;
+                }
+
+                var bytes = new FileInfo(path).Length;
+                File.Delete(path);
+                Console.Error.WriteLine(
+                    $"[LOADER][INFO] Vulkan pipeline cache now keeps one file per shader; removed the single-file cache: path={path} bytes={bytes}");
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                Console.Error.WriteLine(
+                    $"[LOADER][WARN] Vulkan single-file pipeline cache removal failed: {exception.Message}");
+            }
+        }
+
         private void MarkPipelineCacheDirty()
         {
             if (_pipelineCache.Handle == 0)
@@ -1325,14 +1389,32 @@ internal static unsafe partial class VulkanVideoPresenter
             // frame, so saving after every slow creation compounds a warm-up
             // hitch into a multi-minute stall. Coalesce all creations into one
             // periodic snapshot; shutdown still forces a final save.
-            if (Environment.TickCount64 - _lastPipelineCacheSaveTick >= PipelineCacheCheckpointIntervalMs)
+            CheckpointPipelineCache();
+        }
+
+        private void CheckpointPipelineCache()
+        {
+            if (!_pipelineCacheDirty || _pipelineCachePath is null)
             {
-                SavePipelineCache(force: false);
+                return;
             }
+
+            var now = Environment.TickCount64;
+            if (now - _lastPipelineCacheSaveTick < PipelineCacheCheckpointIntervalMs || now < _pipelineCacheRetryTick)
+            {
+                return;
+            }
+
+            _pipelineCacheRetryTick = now + PipelineCacheRetryMs;
+            SavePipelineCache(force: false);
         }
 
         private void SavePipelineCache(bool force)
         {
+            // Cache export must not race asynchronous pipeline creation.
+            if (_pendingComputePipelines.Values.Any(pending => !pending.Compile.IsCompleted)) return;
+            _lastPipelineCacheSaveTick = Environment.TickCount64;
+            SaveGuestPipelineCaches();
             if (_pipelineCache.Handle == 0 || string.IsNullOrWhiteSpace(_pipelineCachePath))
             {
                 return;
@@ -1343,19 +1425,56 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
+            if (QueryPipelineCacheSize(_pipelineCache) is { } size && size == _pipelineCacheSavedBytes)
+            {
+                _pipelineCacheDirty = false;
+                return;
+            }
+
+            if (SaveDriverPipelineCache(_pipelineCache, _pipelineCachePath, MaxPipelineCacheBytes, out var savedBytes))
+            {
+                _pipelineCacheDirty = false;
+                _pipelineCacheSavedBytes = savedBytes;
+                Console.Error.WriteLine(
+                    $"[LOADER][INFO] Vulkan pipeline cache saved: path={_pipelineCachePath} bytes={savedBytes}");
+            }
+        }
+
+        private nuint? QueryPipelineCacheSize(PipelineCache cache)
+        {
+            nuint size = 0;
+            return _vk.GetPipelineCacheData(_device, cache, &size, null) == Result.Success ? size : null;
+        }
+
+        private bool SaveDriverPipelineCache(PipelineCache cache, string path, ulong byteLimit, out nuint savedBytes)
+        {
+            savedBytes = 0;
             try
             {
                 nuint size = 0;
                 var result = _vk.GetPipelineCacheData(
                     _device,
-                    _pipelineCache,
+                    cache,
                     &size,
                     null);
-                if (result != Result.Success || size == 0 || size > 256u * 1024u * 1024u)
+                if (result != Result.Success || size == 0)
                 {
                     Console.Error.WriteLine(
                         $"[LOADER][WARN] Vulkan pipeline cache query failed: result={result} size={size}");
-                    return;
+                    return false;
+                }
+
+                if (size > byteLimit)
+                {
+                    if ((_resetPipelineCachePaths ??= new HashSet<string>(StringComparer.Ordinal)).Add(path))
+                    {
+                        WritePipelineCacheFile(path, []);
+                        Console.Error.WriteLine(
+                            $"[LOADER][INFO] Vulkan pipeline cache outgrew its limit; the next launch starts a fresh cache: path={path} bytes={size} limit={byteLimit}");
+                    }
+
+                    savedBytes = size;
+                    return true;
                 }
 
                 var data = new byte[checked((int)size)];
@@ -1363,7 +1482,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 {
                     result = _vk.GetPipelineCacheData(
                         _device,
-                        _pipelineCache,
+                        cache,
                         &size,
                         dataPointer);
                 }
@@ -1372,7 +1491,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 {
                     Console.Error.WriteLine(
                         $"[LOADER][WARN] Vulkan pipeline cache export failed: {result}");
-                    return;
+                    return false;
                 }
 
                 if (size != (nuint)data.Length)
@@ -1380,25 +1499,29 @@ internal static unsafe partial class VulkanVideoPresenter
                     Array.Resize(ref data, checked((int)size));
                 }
 
-                var directory = Path.GetDirectoryName(_pipelineCachePath);
-                if (!string.IsNullOrWhiteSpace(directory))
-                {
-                    Directory.CreateDirectory(directory);
-                }
-
-                var temporaryPath = _pipelineCachePath + $".{Environment.ProcessId}.tmp";
-                File.WriteAllBytes(temporaryPath, PipelineCacheSignature.Wrap(DriverCacheSignature(), data));
-                File.Move(temporaryPath, _pipelineCachePath, overwrite: true);
-                _pipelineCacheDirty = false;
-                _lastPipelineCacheSaveTick = Environment.TickCount64;
-                Console.Error.WriteLine(
-                    $"[LOADER][INFO] Vulkan pipeline cache saved: path={_pipelineCachePath} bytes={data.Length}");
+                WritePipelineCacheFile(path, data);
+                savedBytes = size;
+                return true;
             }
             catch (Exception exception)
             {
                 Console.Error.WriteLine(
                     $"[LOADER][WARN] Vulkan pipeline cache save failed: {exception.Message}");
+                return false;
             }
+        }
+
+        private void WritePipelineCacheFile(string path, ReadOnlySpan<byte> data)
+        {
+            var directory = Path.GetDirectoryName(path);
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            var temporaryPath = path + $".{Environment.ProcessId}.tmp";
+            File.WriteAllBytes(temporaryPath, PipelineCacheSignature.Wrap(DriverCacheSignature(), data));
+            File.Move(temporaryPath, path, overwrite: true);
         }
 
         private void CreateCommandResources()

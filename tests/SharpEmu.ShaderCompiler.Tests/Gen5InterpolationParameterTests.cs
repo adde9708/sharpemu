@@ -114,6 +114,23 @@ public sealed class Gen5InterpolationParameterTests
     }
 
     [Fact]
+    public void PixelSystemInputs_ReadTheirBuiltIns()
+    {
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(
+            Request(0, false, inputs: 0xF002, opcode: "VInterpP2F32"), out var shader, out var error), error);
+        var instructions = Instructions(shader.Spirv);
+        var builtIns = instructions
+            .Where(instruction => instruction.Opcode == SpirvOp.Decorate &&
+                instruction.Operands[1] == (uint)SpirvDecoration.BuiltIn)
+            .Select(instruction => instruction.Operands[2]).ToArray();
+        Assert.Contains((uint)SpirvBuiltIn.FrontFacing, builtIns);
+        Assert.Contains((uint)SpirvBuiltIn.Layer, builtIns);
+        Assert.Contains((uint)SpirvBuiltIn.SampleMask, builtIns);
+        Assert.Contains(instructions, instruction => instruction.Opcode == SpirvOp.ShiftLeftLogical);
+        ValidateWhenAvailable(shader.Spirv);
+    }
+
+    [Fact]
     public void SlotsReadingOneParameter_ShareOneInput()
     {
         // PS slots 1 and 2 both read VS parameter 1; the second slot must not move to a

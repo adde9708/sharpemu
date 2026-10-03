@@ -132,6 +132,17 @@ public readonly record struct Gen5PixelOutputBinding(
         : this(guestSlot, hostLocation, kind, Gen5ColorComponentMapping.Identity)
     {
     }
+
+    private readonly uint? _exportTarget;
+
+    // The EXP MRT target that feeds this slot. It differs from the slot when the pixel
+    // program skips targets, because the hardware packs color exports into the slots
+    // that CB_SHADER_MASK enables.
+    public uint ExportTarget
+    {
+        get => _exportTarget ?? GuestSlot;
+        init => _exportTarget = value;
+    }
 }
 
 public readonly record struct Gen5ComputeSystemRegisters(
@@ -325,7 +336,12 @@ public sealed record Gen5ShaderInstruction(
     IReadOnlyList<uint> Words,
     IReadOnlyList<Gen5Operand> Sources,
     IReadOnlyList<Gen5Operand> Destinations,
-    Gen5InstructionControl? Control);
+    Gen5InstructionControl? Control)
+{
+    public ulong? AddressOffset { get; init; }
+
+    public ulong ProgramOffset => AddressOffset ?? Pc;
+}
 
 public sealed record Gen5ShaderProgram(
     ulong Address,

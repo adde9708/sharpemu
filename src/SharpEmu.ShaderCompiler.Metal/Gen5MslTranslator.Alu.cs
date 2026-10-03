@@ -1074,14 +1074,21 @@ public static partial class Gen5MslTranslator
                 var immediate = unchecked((uint)(short)(instruction.Words[0] & 0xFFFF));
                 if (instruction.Opcode.StartsWith("SCmpk", StringComparison.Ordinal))
                 {
+                    // The unsigned compares take SIMM16 zero-extended; only the signed ones sign-extend it.
+                    if (instruction.Opcode.EndsWith("U32", StringComparison.Ordinal))
+                    {
+                        immediate = instruction.Words[0] & 0xFFFF;
+                    }
+
                     return TryEmitScalarCompareK(instruction, destination, immediate, out error);
                 }
 
+                var current = ScalarExpression(destination);
                 var value = instruction.Opcode switch
                 {
                     "SMovkI32" => FormatUInt(immediate),
-                    "SAddkI32" => $"({ScalarExpression(destination)} + {FormatUInt(immediate)})",
-                    "SMulkI32" => $"({ScalarExpression(destination)} * {FormatUInt(immediate)})",
+                    "SAddkI32" => $"({current} + {FormatUInt(immediate)})",
+                    "SMulkI32" => $"({current} * {FormatUInt(immediate)})",
                     _ => string.Empty,
                 };
                 if (value.Length == 0)
@@ -1090,7 +1097,17 @@ public static partial class Gen5MslTranslator
                     return false;
                 }
 
-                StoreScalar(destination, Temp("uint", value));
+                var stored = Temp("uint", value);
+                // RDNA2 ISA: S_ADDK_I32 writes SCC = signed overflow, exactly like
+                // S_ADD_I32. S_MOVK_I32 and S_MULK_I32 leave SCC alone.
+                if (instruction.Opcode == "SAddkI32")
+                {
+                    var addend = FormatUInt(immediate);
+                    Line(
+                        $"scc = ((~({current} ^ {addend}) & ({current} ^ {stored})) >> 31) != 0u;");
+                }
+
+                StoreScalar(destination, stored);
                 return true;
             }
 
@@ -1099,12 +1116,25 @@ public static partial class Gen5MslTranslator
                 {
                     // The shader base is pushed per draw; the program offset is added to it.
                     var (baseLow, baseHigh) = ShaderBaseWords();
-                    var offset = instruction.Pc + (ulong)(instruction.Words.Count * sizeof(uint));
+                    var offset = unchecked(instruction.ProgramOffset + (ulong)(instruction.Words.Count * sizeof(uint)));
                     var address = Temp("ulong", $"((ulong){baseLow} | ((ulong){baseHigh} << 32)) + {offset}ul");
                     StoreScalar(destination, $"(uint){address}");
                     StoreScalar(destination + 1, $"(uint)({address} >> 32)");
                     return true;
                 }
+            }
+
+            if (instruction.Opcode is "SQuadmaskB32" or "SQuadmaskB64")
+            {
+                var wide = instruction.Opcode == "SQuadmaskB64";
+                var source = Temp(wide ? "ulong" : "uint", wide ? RawSource64(instruction, 0) : RawSource(instruction, 0));
+                var result = Temp("uint", "0u");
+                for (var quad = 0; quad < (wide ? 16 : 8); quad++)
+                    Line($"{result} |= (({source} >> {quad * 4}) & 15{(wide ? "ul" : "u")}) != 0 ? {1u << quad}u : 0u;");
+                StoreScalar(destination, result);
+                if (wide) StoreScalar(destination + 1, "0u");
+                Line($"scc = {result} != 0u;");
+                return true;
             }
 
             if (instruction.Opcode == "SBcnt1I32B64")

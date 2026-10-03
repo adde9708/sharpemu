@@ -194,6 +194,37 @@ public sealed class RenderExecutorComputeTests : IDisposable
         Assert.Null(_executor.TryDecodeImageClear(input, 256, 1, 1, ClearInitiator));
     }
 
+    // AGC's fill kernel: s_buffer_load_dword the value from a one-record buffer, store it per thread.
+    private void ConfigureLoadedValueFill(uint records, ulong valueAddress, uint value)
+    {
+        Span<byte> bytes = stackalloc byte[sizeof(uint)];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes, value);
+        Assert.True(_host.GuestMemory.TryWrite(valueAddress, bytes));
+        var target = BufferDescriptor(MetadataAddress, 4, records, format: BufferDescriptorWords.Format32UInt);
+        var source = BufferDescriptor(valueAddress, 0, 1);
+        var program = Program(ShaderStageKind.Compute, buffers:
+        [
+            new BufferResourceInfo(Read: true, Written: false, Atomic: false, Formatted: false, Scalar: true, MaxByteExtent: 4, PackedStride: 0),
+            ClearResource(maxByteExtent: 4, packedStride: 4),
+        ]);
+        _pipelines.Compute = ComputeProgram(Stage(program, buffers: [source, target], userData: [.. target, .. source]));
+    }
+
+    [Fact]
+    public void LoadedValueFill_DecodesWithTheValueReadFromItsSourceBuffer()
+    {
+        const ulong valueAddress = RecordingRenderHost.MemoryBase + 0x70_0000;
+        ConfigureLoadedValueFill(128 * 64, valueAddress, 0x4040_4040);
+
+        var clear = _executor.TryDecodeImageClear(_pipelines.Compute.Input, 128, 1, 1, 0x41);
+        Assert.NotNull(clear);
+        Assert.Equal((MetadataAddress, 0x4040_4040u, 0x8000ul), (clear.Value.Descriptor.Address, clear.Value.PackedClear, clear.Value.Size));
+
+        // The dispatch must cover exactly one record per thread.
+        Assert.Null(_executor.TryDecodeImageClear(_pipelines.Compute.Input, 127, 1, 1, 0x41));
+        Assert.Null(_executor.TryDecodeImageClear(_pipelines.Compute.Input, 128, 2, 1, 0x41));
+    }
+
     [Fact]
     public void DifferentPatternDwords_RefuseTheClearAndRunTheDispatch()
     {
@@ -319,5 +350,140 @@ public sealed class RenderExecutorComputeTests : IDisposable
         _pipelines.Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [written]), buffers: [[1, 2]]));
         var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41));
         Assert.Contains("index=0 words=2", fatal.Message);
+    }
+
+    private const ulong FillParameters = RecordingRenderHost.MemoryBase + 0x70_0000;
+    private const uint Format32UInt = 20;
+
+    private void ConfigureBoundedFill(uint start, uint count, uint records)
+    {
+        _host.WriteGuest(FillParameters, [.. BitConverter.GetBytes(start), .. BitConverter.GetBytes(count)]);
+        var fill = new SharpEmu.Libs.Gpu.Pipelines.BoundedFill(
+            8,
+            new SharpEmu.Libs.Gpu.Pipelines.FillWord(SharpEmu.Libs.Gpu.Pipelines.FillWordSource.BufferResource, 4, 0, 4),
+            new SharpEmu.Libs.Gpu.Pipelines.FillWord(SharpEmu.Libs.Gpu.Pipelines.FillWordSource.BufferResource, 4, 0, 0),
+            0,
+            null,
+            [.. Enumerable.Range(0, 4).Select(register =>
+                new SharpEmu.Libs.Gpu.Pipelines.FillWord(SharpEmu.Libs.Gpu.Pipelines.FillWordSource.UserData, (uint)register, 0, 0))],
+            true);
+        var program = new ShaderProgramInfo { Stage = ShaderStageKind.Compute, Hash = 0xF111, BoundedFill = fill };
+        var destination = BufferDescriptor(MetadataAddress, 4, records, format: Format32UInt);
+        var parameters = BufferDescriptor(FillParameters, 16, 1, format: 0);
+        var input = ComputeProgram(Stage(program, userData: [.. destination, .. parameters])).Input;
+        _pipelines.Compute = new ComputeProgram
+        {
+            Program = new ShaderProgram(0x33),
+            Input = new ComputeInputInfo
+            {
+                ThreadsX = 64, ThreadsY = 1, ThreadsZ = 1, GroupIdX = true, ThreadIdCount = 1, WaveSize = 64,
+                WorkgroupRegister = 8, Stage = input.Stage,
+            },
+        };
+    }
+
+    [Fact]
+    public void BoundedFillOverDccMetadata_BecomesAFillAndRecordsNothing()
+    {
+        _host.RegisteredDcc.Add(MetadataAddress + 0x40);
+        ConfigureBoundedFill(start: 0x10, count: 0x300, records: 0x400);
+        _executor.Dispatch(1, Banks(), 16, 1, 1, 0x41);
+
+        Assert.Contains($"fill_dcc {MetadataAddress + 0x40:X} C00 00000000", _host.Calls);
+        AssertNotDispatched();
+        Assert.Contains("reset_bindings", _host.Calls);
+    }
+
+    [Fact]
+    public void BoundedFill_IsClampedToTheThreadsAndTheRecords()
+    {
+        _host.RegisteredDcc.Add(MetadataAddress + 0x40);
+        ConfigureBoundedFill(start: 0x10, count: 0x1000, records: 0x200);
+        _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
+
+        Assert.Contains($"fill_dcc {MetadataAddress + 0x40:X} 400 00000000", _host.Calls);
+        AssertNotDispatched();
+    }
+
+    [Fact]
+    public void BoundedFillWithThreadDimensions_CoversExactlyTheDispatchedThreads()
+    {
+        _host.RegisteredDcc.Add(MetadataAddress + 0x40);
+        ConfigureBoundedFill(start: 0x10, count: 0x1000, records: 0x400);
+        _executor.Dispatch(1, Banks(), 0x123, 1, 1, 0x61);
+
+        Assert.Contains($"fill_dcc {MetadataAddress + 0x40:X} 48C 00000000", _host.Calls);
+        AssertNotDispatched();
+    }
+
+    private void ConfigurePatternFill(uint count, uint length, uint[] pattern)
+    {
+        static SharpEmu.Libs.Gpu.Pipelines.FillWord User(uint register) =>
+            new(SharpEmu.Libs.Gpu.Pipelines.FillWordSource.UserData, register, 0, 0);
+        var fill = new SharpEmu.Libs.Gpu.Pipelines.BoundedFill(
+            10, User(8), null, null, User(4), [User(0), User(1), User(2), User(3)], true, [User(4), User(5), User(6), User(7)], User(9));
+        var program = new ShaderProgramInfo { Stage = ShaderStageKind.Compute, Hash = 0xF222, BoundedFill = fill };
+        var destination = BufferDescriptor(MetadataAddress, 4, 0x400, format: Format32UInt);
+        _pipelines.Compute = new ComputeProgram
+        {
+            Program = new ShaderProgram(0x33),
+            Input = new ComputeInputInfo
+            {
+                ThreadsX = 64, ThreadsY = 1, ThreadsZ = 1, GroupIdX = true, ThreadIdCount = 1, WaveSize = 64,
+                WorkgroupRegister = 10, Stage = Stage(program, userData: [.. destination, .. pattern, count, length]),
+            },
+        };
+    }
+
+    [Fact]
+    public void SingleValuePatternFillOverDccMetadata_BecomesAFill()
+    {
+        _host.RegisteredDcc.Add(MetadataAddress);
+        ConfigurePatternFill(count: 0x400, length: 1, pattern: [0xFFFFFFFF, 0, 0, 0]);
+        _executor.Dispatch(1, Banks(), 0x400, 1, 1, 0x61);
+
+        Assert.Contains($"fill_dcc {MetadataAddress:X} 1000 FFFFFFFF", _host.Calls);
+        AssertNotDispatched();
+    }
+
+    [Fact]
+    public void AVaryingPatternFill_RunsTheDispatch()
+    {
+        _host.RegisteredDcc.Add(MetadataAddress);
+        ConfigurePatternFill(count: 0x400, length: 2, pattern: [0xFFFFFFFF, 0, 0, 0]);
+        _executor.Dispatch(1, Banks(), 0x400, 1, 1, 0x61);
+
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("fill_dcc", StringComparison.Ordinal));
+        AssertDispatched(16, 1, 1);
+    }
+
+    [Fact]
+    public void BoundedFillOutsideDccMetadata_RunsTheDispatch()
+    {
+        ConfigureBoundedFill(start: 0x10, count: 0x300, records: 0x400);
+        _executor.Dispatch(1, Banks(), 16, 1, 1, 0x41);
+
+        Assert.Contains($"fill_dcc {MetadataAddress + 0x40:X} C00 00000000", _host.Calls);
+        AssertDispatched(16, 1, 1);
+    }
+
+    [Fact]
+    public void BoundedFillWithAnotherGroupRegister_RunsTheDispatch()
+    {
+        _host.RegisteredDcc.Add(MetadataAddress + 0x40);
+        ConfigureBoundedFill(start: 0x10, count: 0x300, records: 0x400);
+        _pipelines.Compute = new ComputeProgram
+        {
+            Program = _pipelines.Compute.Program,
+            Input = new ComputeInputInfo
+            {
+                ThreadsX = 64, ThreadsY = 1, ThreadsZ = 1, GroupIdX = true, ThreadIdCount = 1, WaveSize = 64,
+                WorkgroupRegister = 9, Stage = _pipelines.Compute.Input.Stage,
+            },
+        };
+        _executor.Dispatch(1, Banks(), 16, 1, 1, 0x41);
+
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("fill_dcc", StringComparison.Ordinal));
+        AssertDispatched(16, 1, 1);
     }
 }

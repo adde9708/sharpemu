@@ -388,6 +388,12 @@ internal sealed class RecordingRenderHost : IRenderHost
         return RegisteredDcc.Contains(address);
     }
 
+    public bool TryFillDccMetadata(ulong address, ulong size, uint fillValue)
+    {
+        Calls.Add($"fill_dcc {address:X} {size:X} {fillValue:X8}");
+        return RegisteredDcc.Contains(address);
+    }
+
     public Exception Fatal(string message) => new RenderExecutorFatalException(message);
 }
 

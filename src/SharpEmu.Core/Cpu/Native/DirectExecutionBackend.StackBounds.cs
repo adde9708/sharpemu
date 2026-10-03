@@ -33,6 +33,36 @@ public sealed partial class DirectExecutionBackend
         EmitUInt32(code, ref offset, field);
     }
 
+    // Fiber switches replace the guest stack without passing through a guest-entry stub, so the
+    // context-transfer stub keeps the Windows TEB bounds in sync from the target state in R11
+    // (stack top at +160, bottom at +168). Only Windows keeps stack bounds at gs:[8]/gs:[16]: on
+    // macOS gs addresses the pthread TSD, where those slots hold errno's address and another key.
+    // Writing a fiber's bounds there nulled errno, and the next failed libc call on the thread
+    // crashed reading it (Demon's Souls, about 10 s into boot).
+    private static unsafe void EmitFiberStackBounds(byte* code, ref int offset)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        ReadOnlySpan<byte> loadTop = [0x4D, 0x8B, 0x93, 160, 0, 0, 0];     // mov r10, [r11+160]
+        foreach (var value in loadTop) EmitByte(code, ref offset, value);
+        EmitStackBound(code, ref offset, 10, 8, store: true);
+        ReadOnlySpan<byte> loadBottom = [0x4D, 0x8B, 0x93, 168, 0, 0, 0];  // mov r10, [r11+168]
+        foreach (var value in loadBottom) EmitByte(code, ref offset, value);
+        EmitStackBound(code, ref offset, 10, 16, store: true);
+    }
+
+    // Test hook: the bytes the fiber stack-bounds sync emits on this host.
+    internal static unsafe byte[] EmitFiberStackBoundsForTest()
+    {
+        var buffer = new byte[64];
+        var offset = 0;
+        fixed (byte* code = buffer)
+        {
+            EmitFiberStackBounds(code, ref offset);
+        }
+
+        return buffer[..offset];
+    }
+
     // R10 points to the entry state. R11 is scratch; RAX remains unchanged.
     private static unsafe void EmitHostStackBounds(byte* code, ref int offset, bool save)
     {

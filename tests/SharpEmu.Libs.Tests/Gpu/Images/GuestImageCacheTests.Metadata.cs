@@ -187,6 +187,62 @@ public sealed partial class GuestImageCacheTests
     }
 
     [Fact]
+    public void GpuDccFill_IsReadableWithoutSynchronization()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const ulong SliceSize = 0x2000;
+        var memory = harness.MapBacked(0x20000, ReadWrite);
+        var metadata = memory + 0x4000;
+        var plain = memory + 0x10000;
+        harness.Write(metadata, Enumerable.Repeat((byte)0xff, (int)SliceSize).ToArray());
+        harness.Write(plain, Enumerable.Repeat((byte)0xff, (int)SliceSize).ToArray());
+        harness.Images.RegisterDccMetadataForTest(metadata, SliceSize);
+        harness.Worker.Run(() =>
+        {
+            _ = harness.Cache.ObtainBuffer(metadata, SliceSize, isWritten: true);
+            _ = harness.Cache.ObtainBuffer(plain, SliceSize, isWritten: true);
+        });
+        Assert.True(harness.Cache.HasGpuDirtyBytes(metadata, SliceSize));
+        Assert.True(harness.Cache.HasGpuDirtyBytes(plain, SliceSize));
+
+        harness.Worker.Run(() =>
+        {
+            harness.Cache.FillBuffer(metadata, SliceSize, 0x00000000, isGds: false);
+            harness.Cache.FillBuffer(plain, SliceSize, 0x00000000, isGds: false);
+        });
+
+        Assert.False(harness.Cache.HasGpuDirtyBytes(metadata, SliceSize));
+        Assert.True(harness.Images.TryReadGuestDccClear(metadata, SliceSize, 0, out _, out var code));
+        Assert.Equal(0x00, code);
+        Assert.True(harness.Cache.HasGpuDirtyBytes(plain, SliceSize));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void CleanDccFill_WritesBothCopiesWithoutMarkingTheGpuCopyNewer()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const ulong SliceSize = 0x2000;
+        var metadata = harness.MapBacked(0x10000, ReadWrite) + 0x4000;
+        harness.Write(metadata, Enumerable.Repeat((byte)0xff, (int)SliceSize).ToArray());
+        harness.Images.RegisterDccMetadataForTest(metadata, SliceSize);
+        _ = harness.Worker.Run(() => harness.Cache.ObtainBuffer(metadata, SliceSize, isWritten: false));
+
+        harness.Worker.Run(() => harness.Cache.FillDccMetadata(metadata, SliceSize, 0x20202020));
+
+        Assert.False(harness.Cache.HasGpuDirtyBytes(metadata, SliceSize));
+        Assert.False(harness.Cache.HasGpuDirtyPages(metadata, SliceSize));
+        Assert.True(harness.Images.TryReadGuestDccClear(metadata, SliceSize, 0, out _, out var code));
+        Assert.Equal(0x20, code);
+        harness.Finish();
+        var (after, afterOffset) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(metadata, SliceSize, isWritten: false));
+        Assert.Equal(Enumerable.Repeat((byte)0x20, 16), harness.ReadBack(after, afterOffset + SliceSize - 16, 16));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void Unregister_DropsMetadataInTheRange()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;

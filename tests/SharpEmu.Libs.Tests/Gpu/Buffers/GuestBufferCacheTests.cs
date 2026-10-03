@@ -24,6 +24,22 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     private const ulong Page = GuestBufferCache.CachingPageSize;
 
     [Fact]
+    public void UnalignedImageObtainUploadsTheWholeDirtyPageToItsBufferOwner()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var owner = harness.Worker.Run(() =>
+            harness.Cache.GetBuffer(harness.Cache.FindBuffer(address, Page)));
+        var expected = Pattern(0x1000, 37);
+        harness.Write(address, expected);
+        var source = harness.Worker.Run(() => harness.Cache.ObtainBufferForImage(address + 17, 64));
+        Assert.Same(owner, source.Buffer);
+        Assert.Equal(expected, harness.ReadBack(owner, owner.Offset(address), 0x1000));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void ImageUploadFailureIdentifiesAHoleBetweenBackedEndpoints()
     {
         if (_vulkan is null) return;

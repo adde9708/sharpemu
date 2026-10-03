@@ -42,6 +42,7 @@ internal interface IShaderPipelineHost
     // emitted as real 64-bit atomics instead of a non-atomic 32-bit pair.
     bool SharedInt64AtomicsEnabled { get; }
     bool ExecGuardElisionEnabled => true;
+    ShaderPrewarmList? ShaderPrewarm => null;
     bool PerVertexPixelInputsSupported => true;
 
     RenderHostLimits Limits { get; }
@@ -68,4 +69,14 @@ internal interface IShaderPipelineHost
     PipelineHandle CreateGraphicsPipeline(GraphicsPipelineDescription description);
 
     PipelineHandle CreateComputePipeline(ComputePipelineDescription description);
+
+    // Creates the compute pipeline without blocking the command stream on the host
+    // shader compiler: false means the compile is still running and the caller should ask
+    // again, true hands over the finished pipeline. A backend that compiles cheaply keeps
+    // the blocking behaviour.
+    bool TryCreateComputePipeline(ComputePipelineDescription description, out PipelineHandle handle)
+    {
+        handle = CreateComputePipeline(description);
+        return true;
+    }
 }

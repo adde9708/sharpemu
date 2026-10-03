@@ -69,6 +69,11 @@ public sealed partial class RenderExecutor
 
         var input = computeProgram.Input;
         var program = input.Stage.Program ?? throw _host.Fatal($"The compute program is missing: shader=0x{compute.Address:X16}.");
+        if (Diagnostics.DccWriterTrace.Enabled)
+        {
+            Diagnostics.DccWriterTrace.CurrentProgram = program.Hash;
+        }
+
         if (RenderTrace.Enabled)
         {
             RenderTrace.Write(
@@ -85,6 +90,12 @@ public sealed partial class RenderExecutor
         }
 
         if (indirectArgumentsAddress == 0 && TryConsumeConstantFill(input, groupsX, groupsY, groupsZ))
+        {
+            _host.ResetBindings();
+            return;
+        }
+
+        if (indirectArgumentsAddress == 0 && TryConsumeBoundedFill(input, groupsX, groupsY, groupsZ, dispatchInitiator))
         {
             _host.ResetBindings();
             return;
@@ -128,7 +139,18 @@ public sealed partial class RenderExecutor
         _host.EndRendering();
         using (_host.BeginPreparation())
         {
-            var pipeline = _pipelines.CreateComputePipeline(input, computeProgram.Program);
+            // The host may compile this program off the command-stream thread and report that
+            // the pipeline is not ready yet. The dispatch waits for it rather than being
+            // dropped: a guest that does not replay a one-shot dispatch deadlocks, because
+            // the dispatch can feed a label a later packet waits on. Asking again keeps the
+            // wait outside the pipeline cache's lock, so other queues can create their own
+            // pipelines while this program compiles.
+            PipelineHandle pipeline;
+            while (!_pipelines.TryCreateComputePipeline(input, computeProgram.Program, out pipeline))
+            {
+                Thread.Sleep(1);
+            }
+
             var bindings = _host.PrepareBindings(input.Stage);
             if (program.UsesDeviceAddresses)
             {
@@ -244,7 +266,99 @@ public sealed partial class RenderExecutor
     }
 
     // Recognizes a dispatch that fills one formatted buffer with a single value over every record.
-    public ComputeImageClear? TryDecodeImageClear(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
+    public ComputeImageClear? TryDecodeImageClear(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator) =>
+        TryDecodeUserDataFill(input, groupsX, groupsY, groupsZ, dispatchInitiator) ??
+        TryDecodeLoadedValueFill(input, groupsX, groupsY, groupsZ) ??
+        TryDecodeConstantFill(input, groupsX, groupsY, groupsZ);
+
+    // AGC's constant fill kernel: one formatted dword buffer written at every thread index with a
+    // value the program moves from a constant (a DCC or CMask clear code).
+    private ComputeImageClear? TryDecodeConstantFill(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ)
+    {
+        var program = input.Stage.Program ?? throw _host.Fatal("The compute stage has no program.");
+        var resources = input.Stage.Resources;
+        if (program.ConstantStoreValue is not { } value ||
+            program.Buffers.Length != 1 || resources.Buffers.Length != 1 || resources.Buffers[0].Length != 4 ||
+            program.Images.Length != 0 || program.SamplerCount != 0 || program.UsesDeviceAddresses)
+        {
+            return null;
+        }
+
+        var info = program.Buffers[0];
+        var descriptor = BufferDescriptorWords.From(resources.Buffers[0]);
+        var threads = (ulong)groupsX * input.ThreadsX;
+        if (!info.Formatted || !info.Written || info.Read || info.Atomic || info.Scalar || info.MaxByteExtent != sizeof(uint) ||
+            descriptor.Stride != sizeof(uint) || descriptor.Format != BufferDescriptorWords.Format32UInt || descriptor.SwizzleEnabled ||
+            descriptor.IndexStride != 0 || descriptor.AddThreadId || descriptor.RecordCount == 0 ||
+            input.ThreadsX != ImageClearWaveSize || input.ThreadsY != 1 || input.ThreadsZ != 1 || input.WaveSize != ImageClearWaveSize ||
+            groupsX == 0 || groupsY != 1 || groupsZ != 1 || threads != descriptor.RecordCount ||
+            !input.GroupIdX || input.GroupIdY || input.GroupIdZ || input.ThreadIdCount != 1 ||
+            (input.DispatchThreadDimensions && input.DispatchThreadsX != threads))
+        {
+            return null;
+        }
+
+        var size = descriptor.Footprint() ?? throw _host.Fatal($"The compute buffer footprint overflows: stride={descriptor.Stride} records={descriptor.RecordCount}.");
+        return new ComputeImageClear(descriptor, value, size);
+    }
+
+    // The fill shader AGC titles use for DCC and CMask clears: each thread stores one dword it loaded
+    // with s_buffer_load_dword from a one-record constant buffer, at its global thread index.
+    private ComputeImageClear? TryDecodeLoadedValueFill(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ)
+    {
+        var program = input.Stage.Program ?? throw _host.Fatal("The compute stage has no program.");
+        var resources = input.Stage.Resources;
+        if (program.Buffers.Length != 2 || resources.Buffers.Length != 2 || program.Images.Length != 0 || program.SamplerCount != 0 ||
+            program.UsesDeviceAddresses || resources.Images.Length != 0 || resources.Samplers.Length != 0 ||
+            resources.Buffers[0].Length != 4 || resources.Buffers[1].Length != 4)
+        {
+            return null;
+        }
+
+        int source = -1, target = -1;
+        for (var index = 0; index < 2; index++)
+        {
+            var info = program.Buffers[index];
+            if (info.Scalar && info.Read && !info.Written && !info.Atomic && info.MaxByteExtent == sizeof(uint))
+            {
+                source = index;
+            }
+            else if (info.Formatted && info.Written && !info.Read && !info.Atomic && !info.Scalar && info.MaxByteExtent == sizeof(uint))
+            {
+                target = index;
+            }
+        }
+
+        if (source < 0 || target < 0)
+        {
+            return null;
+        }
+
+        var descriptor = BufferDescriptorWords.From(resources.Buffers[target]);
+        var valueDescriptor = BufferDescriptorWords.From(resources.Buffers[source]);
+        var threads = (ulong)groupsX * input.ThreadsX;
+        if (descriptor.Stride != sizeof(uint) || descriptor.Format != BufferDescriptorWords.Format32UInt || descriptor.SwizzleEnabled ||
+            descriptor.IndexStride != 0 || descriptor.AddThreadId || descriptor.RecordCount == 0 ||
+            input.ThreadsX != ImageClearWaveSize || input.ThreadsY != 1 || input.ThreadsZ != 1 || input.WaveSize != ImageClearWaveSize ||
+            groupsX == 0 || groupsY != 1 || groupsZ != 1 || threads != descriptor.RecordCount ||
+            !input.GroupIdX || input.GroupIdY || input.GroupIdZ || input.ThreadIdCount != 1 ||
+            (input.DispatchThreadDimensions && input.DispatchThreadsX != threads) ||
+            valueDescriptor.Address == 0)
+        {
+            return null;
+        }
+
+        Span<byte> value = stackalloc byte[sizeof(uint)];
+        if (!_host.TryReadGuest(valueDescriptor.Address, value))
+        {
+            return null;
+        }
+
+        var size = descriptor.Footprint() ?? throw _host.Fatal($"The compute buffer footprint overflows: stride={descriptor.Stride} records={descriptor.RecordCount}.");
+        return new ComputeImageClear(descriptor, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(value), size);
+    }
+
+    private ComputeImageClear? TryDecodeUserDataFill(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
     {
         var program = input.Stage.Program ?? throw _host.Fatal("The compute stage has no program.");
         var resources = input.Stage.Resources;
@@ -338,6 +452,184 @@ public sealed partial class RenderExecutor
         }
 
         return consumed;
+    }
+
+    private const uint Format32SInt = 21;
+    private const uint Format32Float = 22;
+    private const ulong DescriptorAddressMask = 0x0000_FFFF_FFFF_FFFFul;
+
+    private bool TryConsumeBoundedFill(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
+    {
+        var program = input.Stage.Program!;
+        if (program.BoundedFill is not { } fill)
+        {
+            return false;
+        }
+
+        if (program.UserDataBase != 0 || fill.GroupScalarRegister != (uint)input.WorkgroupRegister || !input.GroupIdX || input.GroupIdY || input.GroupIdZ ||
+            input.ThreadIdCount < 1 || input.ThreadsX != ImageClearWaveSize || input.ThreadsY != 1 || input.ThreadsZ != 1 ||
+            groupsX == 0 || groupsY != 1 || groupsZ != 1)
+        {
+            return RefuseBoundedFill(program,
+                $"shape group=s{fill.GroupScalarRegister}/s{input.WorkgroupRegister} ids={input.GroupIdX}{input.GroupIdY}{input.GroupIdZ} tid={input.ThreadIdCount} " +
+                $"local={input.ThreadsX}x{input.ThreadsY}x{input.ThreadsZ} dispatch={groupsX}x{groupsY}x{groupsZ} base={program.UserDataBase}");
+        }
+
+        var userData = input.Stage.Resources.UserData;
+        Span<uint> destinationWords = stackalloc uint[4];
+        for (var word = 0; word < destinationWords.Length; word++)
+        {
+            if (!TryResolveFillWord(fill.Destination[word], userData, out destinationWords[word]))
+            {
+                return RefuseBoundedFill(program, $"destination word {word} unreadable");
+            }
+        }
+
+        var destination = BufferDescriptorWords.From(destinationWords);
+        uint start = 0;
+        uint value;
+        if (!TryResolveFillWord(fill.Count, userData, out var count) ||
+            (fill.Start is { } startWord && !TryResolveFillWord(startWord, userData, out start)))
+        {
+            return RefuseBoundedFill(program, "range unreadable");
+        }
+
+        if (fill.ConstantValue is { } constant)
+        {
+            value = constant;
+        }
+        else if (fill.Value is not { } valueWord || !TryResolveFillWord(valueWord, userData, out value))
+        {
+            return RefuseBoundedFill(program, "value unreadable");
+        }
+
+        if (fill.PatternLength is { } lengthWord)
+        {
+            if (fill.Pattern is not { } pattern || !TryResolveFillWord(lengthWord, userData, out var length) || length == 0 || length > pattern.Length)
+            {
+                return RefuseBoundedFill(program, "pattern length");
+            }
+
+            for (var word = 1; word < length; word++)
+            {
+                if (!TryResolveFillWord(pattern[word], userData, out var repeated) || repeated != value)
+                {
+                    return RefuseBoundedFill(program, $"pattern length={length} varies");
+                }
+            }
+        }
+
+        if (destination.Stride != sizeof(uint) || destination.SwizzleEnabled || destination.AddThreadId || destination.OutOfBounds != 0 ||
+            destination.Type != 0 || (destination.Address & 3) != 0 ||
+            (fill.Formatted && destination.Format is not (Format32UInt or Format32SInt or Format32Float)))
+        {
+            return RefuseBoundedFill(program,
+                $"descriptor stride={destination.Stride} swizzle={destination.SwizzleEnabled} tid={destination.AddThreadId} oob={destination.OutOfBounds} " +
+                $"type={destination.Type} format={destination.Format} address=0x{destination.Address:X}");
+        }
+
+        var threads = (dispatchInitiator & DispatchInitiatorUseThreadDimensions) != 0 ? groupsX : (ulong)groupsX * input.ThreadsX;
+        var written = Math.Min(count, threads);
+        if (threads > uint.MaxValue || (ulong)start + written > uint.MaxValue)
+        {
+            return RefuseBoundedFill(program, $"overflow threads={threads} start={start} count={count}");
+        }
+
+        var end = Math.Min((ulong)start + written, destination.RecordCount);
+        if (end <= start)
+        {
+            return false;
+        }
+
+        var address = destination.Address + (ulong)start * sizeof(uint);
+        var size = (end - start) * sizeof(uint);
+        var consumed = _host.TryFillDccMetadata(address, size, value);
+        if (RenderTrace.Enabled && RenderTrace.MetadataClear())
+        {
+            RenderTrace.Write($"Bounded fill: shader=0x{program.Hash:X16} address=0x{address:X16} size=0x{size:X} value=0x{value:X8} consumed={consumed}");
+        }
+
+        return consumed;
+    }
+
+    private static bool RefuseBoundedFill(ShaderProgramInfo program, string reason)
+    {
+        Diagnostics.DccWriterTrace.Refuse(program.Hash, reason);
+        return false;
+    }
+
+    private bool TryResolveFillWord(Pipelines.FillWord word, ReadOnlySpan<uint> userData, out uint value)
+    {
+        value = 0;
+        switch (word.Source)
+        {
+            case Pipelines.FillWordSource.UserData:
+                if (word.Register >= userData.Length)
+                {
+                    return false;
+                }
+
+                value = userData[(int)word.Register];
+                return true;
+            case Pipelines.FillWordSource.BufferResource:
+            {
+                if (word.Register + 4 > userData.Length)
+                {
+                    return false;
+                }
+
+                var resource = BufferDescriptorWords.From(userData.Slice((int)word.Register, 4));
+                var size = resource.Stride == 0 ? resource.RecordCount : (ulong)resource.Stride * resource.RecordCount;
+                var offset = (ulong)word.Offset & ~3ul;
+                if (offset > size || size - offset < sizeof(uint))
+                {
+                    return true;
+                }
+
+                return TryReadFillWord((resource.Address & ~3ul) + offset, out value);
+            }
+            case Pipelines.FillWordSource.Pointer:
+                return TryReadPointer(word.Register, userData, out var pointer) && TryReadFillWord(pointer + (ulong)word.Offset, out value);
+            case Pipelines.FillWordSource.IndirectPointer:
+            {
+                if (!TryReadPointer(word.Register, userData, out var outer) ||
+                    !TryReadFillWord(outer + (ulong)word.PointerOffset, out var low) ||
+                    !TryReadFillWord(outer + (ulong)word.PointerOffset + sizeof(uint), out var high))
+                {
+                    return false;
+                }
+
+                var inner = ((low | ((ulong)high << 32)) & DescriptorAddressMask) & ~3ul;
+                return TryReadFillWord(inner + (ulong)word.Offset, out value);
+            }
+            default:
+                return false;
+        }
+    }
+
+    private static bool TryReadPointer(uint register, ReadOnlySpan<uint> userData, out ulong pointer)
+    {
+        pointer = 0;
+        if (register + 2 > userData.Length)
+        {
+            return false;
+        }
+
+        pointer = ((userData[(int)register] | ((ulong)userData[(int)register + 1] << 32)) & DescriptorAddressMask) & ~3ul;
+        return pointer != 0;
+    }
+
+    private bool TryReadFillWord(ulong address, out uint value)
+    {
+        value = 0;
+        Span<byte> bytes = stackalloc byte[sizeof(uint)];
+        if (address == 0 || !_host.TryReadGuest(address, bytes))
+        {
+            return false;
+        }
+
+        value = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+        return true;
     }
 
     private bool TryConsumeImageClear(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)

@@ -31,6 +31,7 @@ public sealed partial class GuestImageCache
         }
 
         image.Registered = true;
+        InvalidateLookups();
         image.RecencyEntryIndex = _recencyQueue.Insert(imageIdentifier, _collectionTick);
         _totalUsedMemory += image.AccountedSize;
     }
@@ -67,6 +68,7 @@ public sealed partial class GuestImageCache
 
         _totalUsedMemory -= accounted;
         image.Registered = false;
+        InvalidateLookups();
     }
 
     // Removes the image and its stencil associations; the slot is freed after the current tick.

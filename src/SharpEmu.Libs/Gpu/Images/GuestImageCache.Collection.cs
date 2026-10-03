@@ -8,10 +8,16 @@ namespace SharpEmu.Libs.Gpu.Images;
 // Garbage collection by recency and memory pressure, and the scheduled readback flush.
 public sealed partial class GuestImageCache
 {
-    public void RunGarbageCollector()
+    public void RunGarbageCollector() => RunGarbageCollector(endsFrame: true);
+
+    // Image ages are counted in frames. Collection also runs after guest submissions, so memory
+    // pressure is relieved during long stretches without a flip, but only a frame advances the
+    // age: a title submits dozens of command buffers per frame, and counting those made every
+    // texture it samples once per frame look stale, so it was deleted and uploaded again.
+    public void RunGarbageCollector(bool endsFrame)
     {
         using var held = _lock.Hold();
-        var tick = _collectionTick++;
+        var tick = endsFrame ? _collectionTick++ : _collectionTick;
         if (_totalUsedMemory < _collectionStartBytes)
         {
             return;
@@ -28,7 +34,13 @@ public sealed partial class GuestImageCache
     {
         var pressured = _totalUsedMemory >= _memoryPressureBytes;
         var aggressive = allowAggressive && _totalUsedMemory >= _criticalMemoryBytes;
-        var age = Math.Min(aggressive ? 160UL : pressured ? 80UL : 16UL, tick);
+        var age = aggressive ? 160UL : pressured ? 80UL : 16UL;
+        if (tick < age && !pressured && !aggressive)
+        {
+            return;
+        }
+
+        age = Math.Min(age, tick);
         var deletions = aggressive ? 40 : pressured ? 20 : 10;
         var candidates = new List<ResourceSlotIdentifier>(deletions);
         // Deleting a depth image also deletes its stencil association, so the recency walk ends first.
@@ -187,12 +199,14 @@ public sealed partial class GuestImageCache
     internal void AddPageOwner(ulong address, ResourceSlotIdentifier imageIdentifier)
     {
         using var held = _lock.Hold();
+        InvalidateLookups();
         _pageOwners.GetOrCreate(address >> ImagePageOwnerTable.PageBits).Add(imageIdentifier);
     }
 
     internal bool RemovePageOwner(ulong address, ResourceSlotIdentifier imageIdentifier)
     {
         using var held = _lock.Hold();
+        InvalidateLookups();
         return _pageOwners.Find(address >> ImagePageOwnerTable.PageBits)?.Remove(imageIdentifier) == true;
     }
 
@@ -249,6 +263,12 @@ public sealed partial class GuestImageCache
 
         metadata.Kind = SurfaceMetadataKind.HTile;
         metadata.ClearMask = 0;
+    }
+
+    internal void RegisterDccMetadataForTest(ulong address, ulong size)
+    {
+        using var held = _lock.Hold();
+        _surfaceMetadata[address] = new SurfaceMetadata { Kind = SurfaceMetadataKind.Dcc, Size = size };
     }
 
     internal RegionLockScope HoldLockForTest() => new(_lock);

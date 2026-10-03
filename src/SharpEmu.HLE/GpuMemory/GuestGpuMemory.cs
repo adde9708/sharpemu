@@ -174,6 +174,26 @@ public sealed class GuestGpuMemory : IDisposable
         }
     }
 
+    // Whether any GPU-registered span intersects the range. Memory outside every span holds no GPU
+    // cache entries and no tracked pages, so mapping changes there need nothing from the GPU worker.
+    public bool OverlapsRegistered(ulong address, ulong size)
+    {
+        if (!new GuestSpan(address, size).IsValid)
+        {
+            return false;
+        }
+
+        _spansLock.EnterReadLock();
+        try
+        {
+            return _spans.Overlaps(address, size);
+        }
+        finally
+        {
+            _spansLock.ExitReadLock();
+        }
+    }
+
     // The host mapping takes the guest protection here; the views themselves are mapped read-write.
     public void Register(ulong address, ulong size, GuestPageProtection protection)
     {

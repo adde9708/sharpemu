@@ -26,6 +26,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 _vk.DeviceWaitIdle(_device);
             }
 
+            StopShaderPrewarm();
+            DrainPendingComputePipelines();
             SavePipelineCache(force: true);
             DrainFrameSlots();
             CollectCompletedGuestSubmissions(waitForOldest: false);
@@ -48,7 +50,8 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 DestroyGuestImage(deferredVersion.Image);
             }
-            DestroyFlipSnapshotPool();
+
+            DrainFlipSnapshotPool();
             DestroySwapchainResources();
             Console.Error.WriteLine(
                 $"[LOADER][INFO] vk.device_memory live_allocations={_deviceInfo.LiveAllocations} " +
@@ -57,6 +60,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 _scheduler.Dispose();
                 _deviceInfo.Slabs.Destroy();
+                DestroyGuestPipelineCaches();
                 if (_pipelineCache.Handle != 0)
                 {
                     _vk.DestroyPipelineCache(_device, _pipelineCache, null);

@@ -196,7 +196,20 @@ internal static unsafe partial class VulkanVideoPresenter
                 SliceResult result;
                 using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.CommandStream))
                 {
-                    result = _commandStream.ProcessOne();
+                    var aliasAccess = _guestBacking?.TryEnterBackingAliasAccess() == true;
+                    _backingAliasAccess = aliasAccess;
+                    try
+                    {
+                        result = _commandStream.ProcessOne();
+                    }
+                    finally
+                    {
+                        _backingAliasAccess = false;
+                        if (aliasAccess)
+                        {
+                            _guestBacking!.ExitBackingAliasAccess();
+                        }
+                    }
                 }
 
                 switch (result)
@@ -305,13 +318,25 @@ internal static unsafe partial class VulkanVideoPresenter
             CollectCompletedGuestSubmissions(waitForOldest: false);
         }
 
-        public void RunGarbageCollector() => RunGuestCacheCollection();
+        public void RunGarbageCollector() => RunGuestCacheCollection(endsFrame: false);
 
         public void EmitGlobalBarrier()
         {
+            // Inside a rendering scope whose draws only wrote attachments, the barrier matters only
+            // to what runs after the scope: everything before the scope is ordered by the barrier
+            // BeginRendering records, and a draw that stores to memory ends a deferred scope first.
+            if (DeferGlobalBarriers && _renderingActive && !_renderingWritesMemory)
+            {
+                _globalBarrierAfterRendering = true;
+                return;
+            }
+
             EndRendering();
-            EndRendering();
-            var commandBuffer = BeginBatchedGuestCommands();
+            RecordGlobalBarrier(BeginBatchedGuestCommands());
+        }
+
+        private void RecordGlobalBarrier(CommandBuffer commandBuffer)
+        {
             var barrier = new MemoryBarrier2
             {
                 SType = StructureType.MemoryBarrier2,
@@ -334,7 +359,8 @@ internal static unsafe partial class VulkanVideoPresenter
         public void FillBuffer(ulong address, ulong size, uint value, bool isGds)
         {
             using var transferScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandMemoryTransfer);
-            EndRendering();
+            // Transfers the buffer cache completes in guest memory leave the rendering scope open;
+            // its GPU paths end the scope before they record.
             _ = BeginBatchedGuestCommands();
             _bufferCache.FillBuffer(address, size, value, isGds);
         }
@@ -342,7 +368,8 @@ internal static unsafe partial class VulkanVideoPresenter
         public void CopyBuffer(ulong destination, ulong source, ulong size, bool destinationIsGds, bool sourceIsGds)
         {
             using var transferScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandMemoryTransfer);
-            EndRendering();
+            // Transfers the buffer cache completes in guest memory leave the rendering scope open;
+            // its GPU paths end the scope before they record.
             _ = BeginBatchedGuestCommands();
             _bufferCache.CopyBuffer(destination, source, size, destinationIsGds, sourceIsGds);
         }
@@ -536,7 +563,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             FlushBatchedGuestCommands();
-            RunGuestCacheCollection();
+            RunGuestCacheCollection(endsFrame: true);
             EnsureGuestSubmissionCapacity();
             long version;
             lock (_gate)
@@ -599,7 +626,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 VulkanSynchronization.PipelineBarrier(_vk,
                     commandBuffer, PipelineStageFlags.TransferBit, PipelineStageFlags.AllCommandsBit, 0, 0, null, 0, null, 1, &toShaderRead);
 
-                FlushBatchedGuestCommands();
+                // The tick of this flush, not the shared field: the presenter thread also
+                // writes _submitTimeline, so reading it here can name an older tick that is
+                // already complete and let the blit run before the copy above.
+                var captureTick = FlushBatchedGuestCommands();
                 submitted = true;
                 _guestImageVersions.Add(version, snapshot);
 
@@ -616,7 +646,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         GuestImageAddress: displayBuffer.Address,
                         GuestImageVersion: version,
                         IsHdr: VideoOutExports.IsHdrPixelFormat(displayBuffer.PixelFormat),
-                        RequiredTick: _submitTimeline,
+                        RequiredTick: captureTick,
                         FlipRequestId: requestId);
                     _latestPresentation = presentation;
                     _pendingGuestImagePresentations.Enqueue(presentation);

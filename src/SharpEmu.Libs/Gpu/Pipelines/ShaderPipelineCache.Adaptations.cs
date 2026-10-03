@@ -187,7 +187,7 @@ internal sealed partial class ShaderPipelineCache
         }
 
         Span<byte> control = stackalloc byte[2 * sizeof(uint)];
-        if (!cpuContext.Memory.TryRead(controlAddress, control))
+        if (!_context.Memory.TryRead(controlAddress, control))
         {
             return false;
         }
@@ -205,7 +205,7 @@ internal sealed partial class ShaderPipelineCache
         var neededSourceDwords = sourceMask == 0 ? 1UL : Math.Min((ulong)sourceMask + 1, outputDwords);
         var readableSourceBytes = Math.Min(Math.Min(sourceBytes, MaxCopyKernelSourceBytes), neededSourceDwords * sizeof(uint));
         var sourceData = new byte[readableSourceBytes - readableSourceBytes % sizeof(uint)];
-        if (sourceData.Length < sizeof(uint) || !cpuContext.Memory.TryRead(sourceAddress, sourceData))
+        if (sourceData.Length < sizeof(uint) || !_context.Memory.TryRead(sourceAddress, sourceData))
         {
             return false;
         }
@@ -227,7 +227,7 @@ internal sealed partial class ShaderPipelineCache
         }
 
         // The dispatch runs in stream order on the worker, so the replacement writes at once.
-        if (!cpuContext.Memory.TryWrite(destinationAddress, output))
+        if (!_context.Memory.TryWrite(destinationAddress, output))
         {
             Console.Error.WriteLine($"[LOADER][ERROR] AGC masked-copy fast path failed dst=0x{destinationAddress:X16} bytes={output.Length}");
             return false;
