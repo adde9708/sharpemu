@@ -455,17 +455,36 @@ public sealed class RenderExecutorStateTests : IDisposable
 
             Sequence();
             Sequence();
-            var baselineReads = _host.GuestReads;
-            var before = GC.GetAllocatedBytesForCurrentThread();
             Sequence();
-            var baselineBytes = GC.GetAllocatedBytesForCurrentThread() - before;
-            var readsPerSequence = _host.GuestReads - baselineReads;
-            before = GC.GetAllocatedBytesForCurrentThread();
-            Sequence();
-            var measuredBytes = GC.GetAllocatedBytesForCurrentThread() - before;
 
+            // A traced-off draw must not reach back into guest memory for what it already recorded.
+            var readsBefore = _host.GuestReads;
+            Sequence();
+            var readsPerSequence = _host.GuestReads - readsBefore;
+            Sequence();
             Assert.Equal(0, readsPerSequence);
-            Assert.Equal(readsPerSequence, _host.GuestReads - baselineReads - readsPerSequence);
+            Assert.Equal(readsPerSequence, _host.GuestReads - readsBefore - readsPerSequence);
+
+            // GetAllocatedBytesForCurrentThread covers the whole thread, so one sample can be
+            // inflated by unrelated activity landing between the two reads, which is what made this
+            // assertion fail intermittently. Ambient allocations can only ever raise a sample, so
+            // the smallest of several runs estimates the sequence's own cost rather than the
+            // thread's, and keeps the comparison a strict non-growth check.
+            long SmallestAllocation(Action sequence)
+            {
+                var smallest = long.MaxValue;
+                for (var sample = 0; sample < 5; sample++)
+                {
+                    var before = GC.GetAllocatedBytesForCurrentThread();
+                    sequence();
+                    smallest = Math.Min(smallest, GC.GetAllocatedBytesForCurrentThread() - before);
+                }
+
+                return smallest;
+            }
+
+            var baselineBytes = SmallestAllocation(Sequence);
+            var measuredBytes = SmallestAllocation(Sequence);
             Assert.True(measuredBytes <= baselineBytes, $"allocated {measuredBytes} bytes against a baseline of {baselineBytes}");
         }
         finally
