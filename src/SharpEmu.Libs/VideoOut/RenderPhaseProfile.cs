@@ -222,9 +222,12 @@ internal static class RenderPhaseProfile
     }
     internal static bool ImageUploadDetailsEnabled => Enabled && _scopeDepth > 0;
 
+    // DataBytes/Pitch/BytesPerBlock/IsBlock ride along so a repeated upload can be compared against
+    // the byte range the guest actually wrote, which is what decides whether a partial copy is possible.
     private readonly record struct ImageUploadKey(ulong Address, uint Width, uint Height, uint Depth,
-        uint Layers, uint Levels, uint Format, uint TileMode, string Reason,
-        string UploadPath, ulong WriteAddress, ulong WriteSize);
+        uint Layers, uint Levels, uint Format, uint TileMode, ulong DataBytes, uint Pitch,
+        uint BytesPerBlock, bool IsBlock, string Reason, string UploadPath, string Layout,
+        ulong WriteAddress, ulong WriteSize);
 
     internal sealed class ImageUploadStatistics
     {
@@ -249,7 +252,7 @@ internal static class RenderPhaseProfile
 
     internal static void RecordImageUpload(in SharpEmu.Libs.Gpu.Images.ImageDescription description,
         string reason, long watchTicks, long sourceTicks, long recordTicks,
-        string uploadPath = "unknown", ulong writeAddress = 0, ulong writeSize = 0)
+        string uploadPath = "unknown", string layout = "unknown", ulong writeAddress = 0, ulong writeSize = 0)
     {
         if (!ImageUploadDetailsEnabled)
         {
@@ -258,8 +261,9 @@ internal static class RenderPhaseProfile
 
         var key = new ImageUploadKey(description.Data.Address, description.Extent.Width,
             description.Extent.Height, description.Extent.Depth, description.Resources.Layers,
-            description.Resources.Levels, (uint)description.PixelFormat, (uint)description.TileMode, reason,
-            uploadPath, writeAddress, writeSize);
+            description.Resources.Levels, (uint)description.PixelFormat, (uint)description.TileMode,
+            description.Data.Size, description.Pitch, description.BytesPerBlock, description.IsBlock,
+            reason, uploadPath, layout, writeAddress, writeSize);
         if (!_imageUploads.TryGetValue(key, out var statistics))
         {
             // Bound diagnostic memory when a frame creates many distinct images.
@@ -290,7 +294,9 @@ internal static class RenderPhaseProfile
         {
             Console.Error.WriteLine($"[PERF][IMAGE_UPLOAD] address=0x{key.Address:X16} " +
                 $"size={key.Width}x{key.Height}x{key.Depth} layers={key.Layers} levels={key.Levels} " +
-                $"format={key.Format} tile={key.TileMode} reason={key.Reason} path={key.UploadPath} " +
+                $"format={key.Format} tile={key.TileMode} bytes={key.DataBytes} pitch={key.Pitch} " +
+                $"bpb={key.BytesPerBlock} block={(key.IsBlock ? 1 : 0)} layout={key.Layout} " +
+                $"reason={key.Reason} path={key.UploadPath} " +
                 $"write_address=0x{key.WriteAddress:X16} write_bytes={key.WriteSize} {FormatImageUploadStatistics(statistics)}");
         }
 

@@ -348,6 +348,32 @@ public sealed unsafe partial class GuestImageCache
         UploadRegions(image, copies.ToList(), depthLinear);
     }
 
+    // Names the conversion a whole-image upload performs and, when the piece-hash path did not run,
+    // which gate turned it off. A tiled source needs a detile, so only a linear source can be
+    // narrowed to the byte range the guest wrote; the log has to show which case a repeat hit is.
+    private static string DescribeUploadLayout(in ImageDescription info, bool pieceHashPrimed, bool bufferModified)
+    {
+        var layout = info.IsDepth ? "depth-tiled-detile" : info.IsTiled ? "tiled-detile" : "linear-copy";
+        if (info.Bgra16)
+        {
+            layout += "+bgra16";
+        }
+
+        if (pieceHashPrimed)
+        {
+            return layout + "+piece-primed";
+        }
+
+        if (bufferModified)
+        {
+            return layout + "+piece-skip:buffer-modified";
+        }
+
+        return info.Data.Size < PieceHashMinimumImageSize
+            ? layout + "+piece-skip:under-16MiB"
+            : layout + "+piece-skip:not-eligible";
+    }
+
     // Uploads the guest bytes when the guest or a buffer owns them; watches the image first.
     private void PopulateFromGuest(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, string uploadPath)
     {
@@ -387,8 +413,10 @@ public sealed unsafe partial class GuestImageCache
             var sourceStarted = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             dataImported = true;
             long sourceFinished;
+            string layout;
             if (TryUploadChangedPieces(image, request))
             {
+                layout = "piece-run";
                 sourceFinished = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             }
             else
@@ -402,6 +430,7 @@ public sealed unsafe partial class GuestImageCache
                 sourceFinished = measureUpload ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                 UploadFromBuffer(image, request, source, sourceOffset);
                 image.SetGuestPieceHashes(pieceHashes);
+                layout = DescribeUploadLayout(image.Description, piecePlan != null, image.IsBufferModified);
             }
 
             if (measureUpload)
@@ -409,7 +438,7 @@ public sealed unsafe partial class GuestImageCache
                 RenderPhaseProfile.RecordImageUpload(image.Description, reason,
                     watchFinished - watchStarted, sourceFinished - sourceStarted,
                     System.Diagnostics.Stopwatch.GetTimestamp() - sourceFinished,
-                    uploadPath, image.LastCpuWriteAddress, image.LastCpuWriteSize);
+                    uploadPath, layout, image.LastCpuWriteAddress, image.LastCpuWriteSize);
             }
         }
 

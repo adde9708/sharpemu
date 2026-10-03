@@ -131,7 +131,8 @@ public sealed class PresenterSubmissionTests
                     var description = SharpEmu.Libs.Gpu.Images.ImageDescription.Create();
                     description.Data = new GuestSpan((ulong)(index + 1) * 4096, 256);
                     RenderPhaseProfile.RecordImageUpload(description, "cpu-dirty", 1, 2, 3,
-                        "before-clear", description.Data.Address, 256);
+                        "before-clear", "linear-copy+piece-skip:under-16MiB",
+                        description.Data.Address, 256);
                 }
             }
 
@@ -141,6 +142,8 @@ public sealed class PresenterSubmissionTests
                 Assert.Equal(9, output.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries).Length);
                 Assert.Contains("other=1 uploads=252 source_bytes=64512", output.ToString());
                 Assert.Contains("path=before-clear", output.ToString());
+                Assert.Contains("layout=linear-copy+piece-skip:under-16MiB", output.ToString());
+                Assert.Contains("bytes=256", output.ToString());
                 Assert.Contains("write_bytes=256", output.ToString());
             }
             else
