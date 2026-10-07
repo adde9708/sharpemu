@@ -288,8 +288,10 @@ public static partial class Gen5SpirvTranslator
 
                 var blocks = BuildBasicBlocks(_request.Program.Instructions);
                 // The fallback when the full structurer declines: blocks in program order behind a
-                // next-block guard, with natural loops as structured loops.
-                var structuredForward = StructuredForwardBlocks && blocks.Count != 0 && TryBuildLoopRegions(blocks, out _loopLatchByHeader);
+                // next-block guard, with natural loops as structured loops. SHARPEMU_STRUCTURED_CF=0
+                // has to reach this path too: it is reached through the else of the gate above, so
+                // gating only that gate left this emitter running and defeated the kill switch.
+                var structuredForward = StructuredControlFlow && StructuredForwardBlocks && blocks.Count != 0 && TryBuildLoopRegions(blocks, out _loopLatchByHeader);
                 DeclareModule();
                 if (blocks.Count == 0)
                 {
@@ -1907,7 +1909,8 @@ public static partial class Gen5SpirvTranslator
             return true;
         }
 
-        // SHARPEMU_STRUCTURED_FORWARD_BLOCKS=0 always emits the block dispatcher loop.
+        // SHARPEMU_STRUCTURED_FORWARD_BLOCKS=0 declines this emitter only; SHARPEMU_STRUCTURED_CF=0
+        // declines both structured emitters.
         private static readonly bool StructuredForwardBlocks = !string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_STRUCTURED_FORWARD_BLOCKS"), "0", StringComparison.Ordinal);
 
