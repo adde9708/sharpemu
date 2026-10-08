@@ -18,6 +18,8 @@ public sealed class RuntimeValueEvaluator
     private readonly ScalarValue? _activeMask;
     private readonly ScalarValueCache _cache;
     private readonly List<ScalarValue> _visiting;
+    private readonly CompiledResourceEvaluator? _compiled;
+    private readonly CompiledValueCache _compiledValues;
 
     public RuntimeValueEvaluator(
         ShaderResourcePlan plan,
@@ -25,7 +27,7 @@ public sealed class RuntimeValueEvaluator
         IReadOnlyList<byte>? cleanFlatSlots = null,
         RuntimeValueEvaluator? cleanEvaluator = null,
         ScalarValue? activeMask = null)
-        : this(plan, inputs, cleanFlatSlots, cleanEvaluator, activeMask, new ScalarValueCache(), [])
+        : this(plan, inputs, cleanFlatSlots, cleanEvaluator, activeMask, new ScalarValueCache(), [], new CompiledValueCache(), true)
     {
     }
 
@@ -35,8 +37,9 @@ public sealed class RuntimeValueEvaluator
         ResourceRuntimeInputs inputs,
         IReadOnlyList<byte>? cleanFlatSlots = null,
         RuntimeValueEvaluator? cleanEvaluator = null,
-        ScalarValue? activeMask = null)
-        : this(plan, inputs, cleanFlatSlots, cleanEvaluator, activeMask, scratch.Values, scratch.Visiting)
+        ScalarValue? activeMask = null,
+        bool useCompiled = true)
+        : this(plan, inputs, cleanFlatSlots, cleanEvaluator, activeMask, scratch.Values, scratch.Visiting, scratch.CompiledValues, useCompiled)
     {
     }
 
@@ -47,7 +50,9 @@ public sealed class RuntimeValueEvaluator
         RuntimeValueEvaluator? cleanEvaluator,
         ScalarValue? activeMask,
         ScalarValueCache cache,
-        List<ScalarValue> visiting)
+        List<ScalarValue> visiting,
+        CompiledValueCache compiledValues,
+        bool useCompiled)
     {
         _cache = cache;
         _visiting = visiting;
@@ -56,6 +61,9 @@ public sealed class RuntimeValueEvaluator
         _cleanFlatSlots = cleanFlatSlots ?? [];
         _cleanEvaluator = cleanEvaluator;
         _activeMask = activeMask;
+        _compiled = useCompiled ? plan.CompiledEvaluator : null;
+        _compiledValues = compiledValues;
+        if (_compiled is not null) _compiledValues.EnsureCapacity(_compiled.Count);
     }
 
     public bool Evaluate(ScalarValue value, out uint result)
@@ -82,6 +90,11 @@ public sealed class RuntimeValueEvaluator
         if (_activeMask is not null && value.Kind == ScalarValueKind.Select && ReferenceEquals(value.Operands[0], _activeMask))
         {
             return EvaluateWide(value.Operands[1], out result);
+        }
+
+        if (_compiled is not null && _compiled.TryGetIndex(value, out var compiledIndex))
+        {
+            return EvaluateCompiled(compiledIndex, out result);
         }
 
         if (_cache.TryGetValue(value, out result))
@@ -143,24 +156,11 @@ public sealed class RuntimeValueEvaluator
             case ScalarValueKind.FirstLane:
             {
                 using var scratch = RuntimeEvaluationScratch.Rent();
-                return new RuntimeValueEvaluator(scratch, _plan, _inputs, _cleanFlatSlots, _cleanEvaluator, value.Operands[1])
+                return new RuntimeValueEvaluator(scratch, _plan, _inputs, _cleanFlatSlots, _cleanEvaluator, value.Operands[1], useCompiled: _compiled is not null)
                     .EvaluateWide(value.Operands[0], out result);
             }
             case ScalarValueKind.ResourceTableWord:
-            {
-                var slot = (int)value.Payload;
-                if (slot >= _plan.TableReads.Count)
-                {
-                    return false;
-                }
-
-                if (slot < _cleanFlatSlots.Count && _cleanFlatSlots[slot] != 0 && _cleanEvaluator is not null)
-                {
-                    return _cleanEvaluator.EvaluateWide(_plan.TableReads[slot].Value, out result);
-                }
-
-                return EvaluateWide(_plan.TableReads[slot].Value, out result);
-            }
+                return EvaluateTableReference((int)value.Payload, out result);
             case ScalarValueKind.ScalarAddressWord:
             case ScalarValueKind.ScalarBufferWord:
                 return EvaluateRawRead(value, out result);
@@ -217,7 +217,6 @@ public sealed class RuntimeValueEvaluator
             return false;
         }
 
-        var baseAddress = ((high << 32) | (uint)low) & AddressMask;
         ulong records = 0;
         if (value.Kind == ScalarValueKind.ScalarBufferWord &&
             (handle.Operands.Length != 4 ||
@@ -227,7 +226,14 @@ public sealed class RuntimeValueEvaluator
             return false;
         }
 
-        switch (ResolveRawAddress(value.Kind, baseAddress, high, records, (long)(int)memory.Offset, (uint)offset, out var address))
+        return ReadRawWord(value.Kind, low, high, (uint)offset, records, (int)memory.Offset, out result);
+    }
+
+    internal bool ReadRawWord(ScalarValueKind kind, ulong low, ulong high, uint offset, ulong records, long immediate, out ulong result)
+    {
+        result = 0;
+        var baseAddress = ((high << 32) | (uint)low) & AddressMask;
+        switch (ResolveRawAddress(kind, baseAddress, high, records, immediate, offset, out var address))
         {
             case RawAddress.Failed:
                 return false;
@@ -314,9 +320,59 @@ public sealed class RuntimeValueEvaluator
         return true;
     }
 
-    internal bool IsEvaluated(ScalarValue value) => _cache.TryGetValue(value, out _);
+    internal bool IsEvaluated(ScalarValue value) =>
+        _compiled is not null && _compiled.TryGetIndex(value, out var index)
+            ? _compiledValues.Contains(index) : _cache.TryGetValue(value, out _);
 
-    internal void Seed(ScalarValue value, ulong result) => _cache[value] = result;
+    internal void Seed(ScalarValue value, ulong result)
+    {
+        if (_compiled is not null && _compiled.TryGetIndex(value, out var index)) _compiledValues.Store(index, result);
+        else _cache[value] = result;
+    }
+
+    internal int BeginCompiled(int index, out ulong result) => _compiledValues.Begin(index, out result);
+    internal void StoreCompiled(int index, ulong result) => _compiledValues.Store(index, result);
+    internal void EndCompiled(int index) => _compiledValues.End(index);
+    internal bool EvaluateCompiled(int index, out ulong result) => _compiled!.Evaluate(this, index, out result);
+    internal bool EvaluateCompiledSpecial(int index, out ulong result) => EvaluateNode(_compiled!.Values[index], out result);
+    internal bool IsCompiledActiveMask(int index) => ReferenceEquals(_activeMask, _compiled!.Values[index]);
+
+    internal bool ReadUserData(int index, out ulong result)
+    {
+        result = 0;
+        if ((uint)index >= (uint)_inputs.UserData.Count) return false;
+        result = _inputs.UserData[index];
+        return true;
+    }
+
+    internal ulong ReadShaderBase() => _inputs.ShaderBase;
+
+    private bool EvaluateTableReference(int slot, out ulong result)
+    {
+        result = 0;
+        if ((uint)slot >= (uint)_plan.TableReads.Count) return false;
+        var selected = slot < _cleanFlatSlots.Count && _cleanFlatSlots[slot] != 0 && _cleanEvaluator is not null ? _cleanEvaluator : this;
+        return selected._compiled is { } compiled
+            ? selected.EvaluateCompiled(compiled.TableWords[slot], out result)
+            : selected.EvaluateWide(_plan.TableReads[slot].Value, out result);
+    }
+
+    private bool EvaluateSourceWord(int source, int word, out uint result)
+    {
+        var value = _plan.DescriptorSources[source].Dwords[word];
+        if (_compiled is null || value.IsConstant) return Evaluate(value, out result);
+        var succeeded = EvaluateCompiled(_compiled.SourceWords[source][word], out var wide);
+        result = (uint)wide;
+        return succeeded;
+    }
+
+    private bool EvaluateTableRead(int index, out uint result)
+    {
+        if (_compiled is null) return Evaluate(_plan.TableReads[index].Value, out result);
+        var succeeded = EvaluateCompiled(_compiled.TableWords[index], out var wide);
+        result = (uint)wide;
+        return succeeded;
+    }
 
     internal ResourceRuntimeInputs Inputs => _inputs;
 
@@ -395,7 +451,7 @@ public sealed class RuntimeValueEvaluator
         // branch_evaluations stays at zero for a title whose plans are all straight-line.
         // That is a property of the shaders, not a disabled or broken counter.
         if (evaluateTable && plan.ResourceBranches.Count != 0)
-            activeSources = EvaluateActiveSources(plan, inputs, cleanEvaluator);
+            activeSources = EvaluateActiveSources(plan, inputs, cleanEvaluator, cleanScratch);
         var evaluated = new List<DescriptorWords>(sources.Count);
         RawReadPrefetch.PrefetchSources(plan, sources, activeSources, evaluator);
         foreach (var sourceIndex in sources)
@@ -411,7 +467,7 @@ public sealed class RuntimeValueEvaluator
             {
                 for (var index = 0; index < words.Length; index++)
                 {
-                    if (!evaluator.Evaluate(source.Dwords[index], out words[index]))
+                    if (!evaluator.EvaluateSourceWord((int)sourceIndex, index, out words[index]))
                     {
                         return false;
                     }
@@ -429,11 +485,12 @@ public sealed class RuntimeValueEvaluator
             try
             {
                 RawReadPrefetch.PrefetchTable(plan, evaluator, cleanEvaluator, cleanFlatSlots);
-                foreach (var read in plan.TableReads)
+                for (var index = 0; index < plan.TableReads.Count; index++)
                 {
+                    var read = plan.TableReads[index];
                     var clean = read.FlatOffset < cleanFlatSlots.Count && cleanFlatSlots[(int)read.FlatOffset] != 0;
                     var selected = clean ? cleanEvaluator : evaluator;
-                    if (read.FlatOffset >= plan.TableReads.Count || !selected.Evaluate(read.Value, out var word))
+                    if (read.FlatOffset >= plan.TableReads.Count || !selected.EvaluateTableRead(index, out var word))
                     {
                         return false;
                     }
@@ -452,15 +509,16 @@ public sealed class RuntimeValueEvaluator
         return true;
     }
 
-    private static bool[] EvaluateActiveSources(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, RuntimeValueEvaluator cleanEvaluator)
+    private static bool[] EvaluateActiveSources(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, RuntimeValueEvaluator cleanEvaluator,
+        RuntimeEvaluationScratch scratch)
     {
         var activeSources = new bool[plan.DescriptorSources.Count];
         Array.Fill(activeSources, true);
         foreach (var block in plan.ResourceBranches)
             foreach (var source in block.Sources) activeSources[source] = false;
 
-        var visited = new bool[plan.ResourceBranches.Count];
-        var pending = new Stack<int>();
+        var visited = scratch.PrepareBranches(plan.ResourceBranches.Count);
+        var pending = scratch.PendingBranches;
         pending.Push(0);
         while (pending.TryPop(out var blockIndex))
         {

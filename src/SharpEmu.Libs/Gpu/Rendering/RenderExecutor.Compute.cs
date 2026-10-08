@@ -101,6 +101,12 @@ public sealed partial class RenderExecutor
             return;
         }
 
+        if (indirectArgumentsAddress == 0 && TryConsumeBoundedCopy(input, groupsX, groupsY, groupsZ, dispatchInitiator))
+        {
+            _host.ResetBindings();
+            return;
+        }
+
         if (indirectArgumentsAddress == 0 && TryConsumeImageClear(input, groupsX, groupsY, groupsZ, dispatchInitiator))
         {
             _host.ResetBindings();
@@ -151,7 +157,7 @@ public sealed partial class RenderExecutor
                 Thread.Sleep(1);
             }
 
-            var bindings = _host.PrepareBindings(input.Stage);
+            var bindings = PrepareBindings(input.Stage);
             if (program.UsesDeviceAddresses)
             {
                 _host.PrepareDeviceAddresses();
@@ -551,6 +557,71 @@ public sealed partial class RenderExecutor
 
         return consumed;
     }
+
+    private bool TryConsumeBoundedCopy(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator)
+    {
+        var program = input.Stage.Program!;
+        if (program.BoundedCopy is not { } copy || !BoundedCopyEnabled)
+        {
+            return false;
+        }
+
+        if (program.UserDataBase != 0 || copy.GroupScalarRegister != (uint)input.WorkgroupRegister || !input.GroupIdX || input.GroupIdY || input.GroupIdZ ||
+            input.ThreadIdCount < 1 || input.ThreadsX != ImageClearWaveSize || input.ThreadsY != 1 || input.ThreadsZ != 1 ||
+            groupsX == 0 || groupsY != 1 || groupsZ != 1)
+        {
+            return RefuseBoundedFill(program, $"copy shape dispatch={groupsX}x{groupsY}x{groupsZ} local={input.ThreadsX}x{input.ThreadsY}x{input.ThreadsZ}");
+        }
+
+        var userData = input.Stage.Resources.UserData;
+        Span<uint> sourceWords = stackalloc uint[4];
+        Span<uint> destinationWords = stackalloc uint[4];
+        for (var word = 0; word < 4; word++)
+        {
+            if (!TryResolveFillWord(copy.Source[word], userData, out sourceWords[word]) ||
+                !TryResolveFillWord(copy.Destination[word], userData, out destinationWords[word]))
+            {
+                return RefuseBoundedFill(program, $"copy descriptor word {word} unreadable");
+            }
+        }
+
+        if (!TryResolveFillWord(copy.Count, userData, out var count) || !TryResolveFillWord(copy.Modulus, userData, out var modulus))
+        {
+            return RefuseBoundedFill(program, "copy range unreadable");
+        }
+
+        var source = BufferDescriptorWords.From(sourceWords);
+        var destination = BufferDescriptorWords.From(destinationWords);
+        if (!IsPlainWordBuffer(source) || !IsPlainWordBuffer(destination) || source.Format != destination.Format ||
+            modulus == 0 || modulus > source.RecordCount)
+        {
+            return RefuseBoundedFill(program,
+                $"copy src=0x{source.Address:X}/{source.Format}/{source.Stride}/{source.OutOfBounds} dst=0x{destination.Address:X}/{destination.Format}/{destination.Stride}/{destination.OutOfBounds} " +
+                $"modulus={modulus} records={source.RecordCount}");
+        }
+
+        var threads = (dispatchInitiator & DispatchInitiatorUseThreadDimensions) != 0 ? groupsX : (ulong)groupsX * input.ThreadsX;
+        var words = Math.Min(Math.Min((ulong)count, threads), destination.RecordCount);
+        if (words == 0)
+        {
+            return false;
+        }
+
+        var consumed = _host.TryCopyWordsOnHost(destination.Address, source.Address, modulus, words);
+        if (RenderTrace.Enabled)
+        {
+            RenderTrace.Write(
+                $"Bounded copy: shader=0x{program.Hash:X16} src=0x{source.Address:X16} dst=0x{destination.Address:X16} words={words} modulus={modulus} consumed={consumed}");
+        }
+
+        return consumed || RefuseBoundedFill(program, $"copy refused by the host dst=0x{destination.Address:X} words={words} modulus={modulus}");
+    }
+
+    private static readonly bool BoundedCopyEnabled = Environment.GetEnvironmentVariable("SHARPEMU_HOST_BOUNDED_COPY") != "0";
+
+    private static bool IsPlainWordBuffer(BufferDescriptorWords descriptor) =>
+        descriptor.Stride == sizeof(uint) && !descriptor.SwizzleEnabled && !descriptor.AddThreadId && descriptor.OutOfBounds == 0 &&
+        descriptor.Type == 0 && (descriptor.Address & 3) == 0 && descriptor.Format is Format32UInt or Format32SInt or Format32Float;
 
     private static bool RefuseBoundedFill(ShaderProgramInfo program, string reason)
     {

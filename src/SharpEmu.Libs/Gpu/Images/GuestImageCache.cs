@@ -123,6 +123,32 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             return GetNullImage(request);
         }
 
+        var found = LookUpImage(ref request, exactFormat);
+        if (request.Role is ImageRole.Texture or ImageRole.StorageImage)
+        {
+            if (request.Description.Metadata.Kind == MetadataKind.Dcc)
+            {
+                using var held = _lock.Hold();
+                var image = _slots[found];
+                if (image.Description.Metadata.Kind == MetadataKind.None)
+                {
+                    image.Description.Metadata.Kind = MetadataKind.Dcc;
+                    image.Description.Metadata.Range = request.Description.Metadata.Range;
+                }
+            }
+
+            ref readonly var description = ref _slots[found].Description;
+            if (description.DccSliceSize is var sliceSize and not 0)
+            {
+                SynchronizeGuestDccMetadata(description.Metadata.Range.Address, sliceSize, request.View.BaseLayer, request.View.LayerCount);
+            }
+        }
+
+        return found;
+    }
+
+    private ResourceSlotIdentifier LookUpImage(ref ImageRequest request, bool exactFormat)
+    {
         using var held = _lock.Hold();
         if (TryReuseLookup(ref request, exactFormat, out var reused))
         {

@@ -26,8 +26,104 @@ public sealed record BoundedFill(
     FillWord[]? Pattern = null,
     FillWord? PatternLength = null);
 
+public sealed record BoundedCopy(
+    uint GroupScalarRegister,
+    FillWord Count,
+    FillWord Modulus,
+    FillWord[] Source,
+    FillWord[] Destination);
+
 public static class BoundedFillDetector
 {
+    private static readonly string[] ModuloCopyOpcodes =
+    [
+        "VLshlAddU32", "SBufferLoadDword", "VCmpxGtU32", "SCbranchExecz", "SBufferLoadDword",
+        "VCvtF32U32", "SCmpLgU32", "SCselectB64", "VRcpIflagF32", "VMulF32", "VCvtU32F32", "VMadU64U32", "VCmpNeU32", "VSubI32",
+        "VCndmaskB32", "VMulHiU32", "VSubI32", "VAddI32", "VCndmaskB32", "VMulHiU32", "VMulLoU32", "VSubI32", "VCmpGeU32",
+        "VCmpLeU32", "SAndB64", "VAddcU32", "VAddCoCiU32", "VCndmaskB32", "VMulLoU32", "VSubI32",
+        "BufferLoadFormatX", "BufferStoreFormatX", "SEndpgm",
+    ];
+
+    public static BoundedCopy? DetectCopy(Gen5ShaderProgram program)
+    {
+        var instructions = program.Instructions
+            .Where(instruction => instruction.Opcode is not ("SWaitcnt" or "STtraceData" or "SInstPrefetch") &&
+                !(instruction.Opcode == "SMovB32" && instruction.Destinations is [{ Kind: Gen5OperandKind.ScalarRegister, Value: MarkerRegister }]))
+            .ToArray();
+        if (!instructions.Select(instruction => instruction.Opcode).SequenceEqual(ModuloCopyOpcodes))
+        {
+            return null;
+        }
+
+        var countLoad = instructions[1];
+        var modulusLoad = instructions[4];
+        if (instructions[0].Destinations is not [{ Kind: Gen5OperandKind.VectorRegister } index] ||
+            instructions[0].Sources is not [{ Kind: Gen5OperandKind.ScalarRegister } group, { Kind: Gen5OperandKind.EncodedConstant, Value: Shift64 },
+                { Kind: Gen5OperandKind.VectorRegister, Value: ThreadIndexRegister }] ||
+            countLoad.Destinations is not [{ Kind: Gen5OperandKind.ScalarRegister } count] ||
+            modulusLoad.Destinations is not [{ Kind: Gen5OperandKind.ScalarRegister } modulus] ||
+            countLoad.Sources is not [{ Kind: Gen5OperandKind.ScalarRegister } constants, _] ||
+            modulusLoad.Sources is not [{ Kind: Gen5OperandKind.ScalarRegister } modulusConstants, _] ||
+            modulusConstants.Value != constants.Value ||
+            instructions[2].Sources is not [{ Kind: Gen5OperandKind.ScalarRegister } limit, { Kind: Gen5OperandKind.VectorRegister } compared] ||
+            limit.Value != count.Value || compared.Value != index.Value ||
+            instructions[5].Sources is not [{ Kind: Gen5OperandKind.ScalarRegister } converted] || converted.Value != modulus.Value ||
+            instructions[6].Sources is not [{ Kind: Gen5OperandKind.EncodedConstant, Value: ZeroConstant }, { Kind: Gen5OperandKind.ScalarRegister } tested] ||
+            tested.Value != modulus.Value)
+        {
+            return null;
+        }
+
+        foreach (var at in new[] { 11, 20, 23, 28 })
+        {
+            if (instructions[at].Sources is not [{ Kind: Gen5OperandKind.ScalarRegister } multiplier, ..] || multiplier.Value != modulus.Value)
+            {
+                return null;
+            }
+        }
+
+        var load = instructions[30];
+        var store = instructions[31];
+        if (instructions[29].Destinations is not [{ Kind: Gen5OperandKind.VectorRegister } remainder] ||
+            instructions[29].Sources is not [{ Kind: Gen5OperandKind.VectorRegister } dividend, { Kind: Gen5OperandKind.VectorRegister }] ||
+            dividend.Value != index.Value ||
+            load.Control is not Gen5BufferMemoryControl { DwordCount: 1, OffsetBytes: 0, IndexEnabled: true, OffsetEnabled: false, Typed: false } loadControl ||
+            store.Control is not Gen5BufferMemoryControl { DwordCount: 1, OffsetBytes: 0, IndexEnabled: true, OffsetEnabled: false, Typed: false } storeControl ||
+            load.Sources is not [_, _, { Kind: Gen5OperandKind.EncodedConstant, Value: ZeroConstant }] ||
+            store.Sources is not [_, _, { Kind: Gen5OperandKind.EncodedConstant, Value: ZeroConstant }] ||
+            loadControl.VectorAddress != remainder.Value || storeControl.VectorAddress != index.Value ||
+            storeControl.VectorData != loadControl.VectorData)
+        {
+            return null;
+        }
+
+        var branch = instructions[3];
+        if (branch.Pc + sizeof(uint) + (uint)((short)(branch.Words[0] & 0xFFFF) * sizeof(uint)) != instructions[^1].Pc)
+        {
+            return null;
+        }
+
+        var resourceRegisters = Enumerable.Range(0, 4)
+            .SelectMany(word => new[] { loadControl.ScalarResource + (uint)word, storeControl.ScalarResource + (uint)word });
+        var constantRegisters = Enumerable.Range(0, 4).Select(word => constants.Value + (uint)word);
+        if (resourceRegisters.Any(WrittenScalars(instructions, instructions.Length).Contains) ||
+            constantRegisters.Any(WrittenScalars(instructions, 4).Contains) ||
+            WrittenScalars(instructions[5..29], 24).Contains(modulus.Value) ||
+            countLoad.Control is not Gen5ScalarMemoryControl { DynamicOffsetRegister: null, ImmediateOffsetBytes: >= 0 } countControl ||
+            modulusLoad.Control is not Gen5ScalarMemoryControl { DynamicOffsetRegister: null, ImmediateOffsetBytes: >= 0 } modulusControl)
+        {
+            return null;
+        }
+
+        FillWord User(uint register) => new(FillWordSource.UserData, register, 0, 0);
+        return new BoundedCopy(
+            group.Value,
+            new FillWord(FillWordSource.BufferResource, constants.Value, 0, countControl.ImmediateOffsetBytes),
+            new FillWord(FillWordSource.BufferResource, constants.Value, 0, modulusControl.ImmediateOffsetBytes),
+            [.. Enumerable.Range(0, 4).Select(word => User(loadControl.ScalarResource + (uint)word))],
+            [.. Enumerable.Range(0, 4).Select(word => User(storeControl.ScalarResource + (uint)word))]);
+    }
+
     private const uint Shift64 = 134;
     private const uint ZeroConstant = 128;
     private const uint NullScalar = 125;

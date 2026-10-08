@@ -273,7 +273,7 @@ public sealed class Gen5ScalarLaneTransferTests
 
     [Theory]
     [InlineData(false, true)]
-    [InlineData(true, false)]
+    [InlineData(true, true)]
     public void OneLaneWaveKeepsSgprsSpilledToOtherLanes(bool subgroups, bool expectSlot)
     {
         // Astro Bot's skinning vertex shader saves EXEC this way and restores it before a

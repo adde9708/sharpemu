@@ -14,7 +14,7 @@ The GUI shows 14 variables on its **Options** and **Game options** pages. This l
 `SHARPEMU_LOG_NP`, `SHARPEMU_PROFILE_PERFORMANCE`, `SHARPEMU_PROFILE_PERFORMANCE_FRAME_TRACE`,
 `SHARPEMU_RENDERDOC`, `SHARPEMU_VK_DISABLE_IMPLICITS`, `SHARPEMU_STRICT_COMPUTE`, `SHARPEMU_VK_VALIDATION`, `SHARPEMU_WRITABLE_APP0`.
 
-The list contains 268 variables. The source was examined on 2026-09-19, branch `dev`.
+The list contains 269 variables. The source was examined on 2026-09-19, branch `dev`.
 The descriptions come from the code that reads each variable. The emulator was not started for this list.
 
 ## How to use a variable
@@ -30,7 +30,7 @@ The descriptions come from the code that reads each variable. The emulator was n
 | Group | Variables |
 | --- | --- |
 | Behavior switches | 19 |
-| GPU and Vulkan | 58 |
+| GPU and Vulkan | 59 |
 | Metal | 10 |
 | Audio and video | 6 |
 | Input | 5 |
@@ -127,6 +127,7 @@ These variables change the GPU path or the Vulkan presenter.
 | `SHARPEMU_SHADER_PREWARM` | `0` | `0` turns off the shader prewarm list. By default, each compute program that a game compiles is added at once to `shader-prewarm.bin` in `user/pipeline_cache/<title id>/`, so a stopped game keeps the list. At the next launch after a change of the shader translator or of the GPU driver, background threads translate the listed programs again and create their pipelines, so that the driver compiles them before the game asks for them. The `shader-prewarm.stamp` file names the build and driver that last did this; with the same build and driver, the launch does no prewarm work. The log shows `Shader prewarm done` and `Shader prewarm hits`. On Windows it replaces the cache file by default; on Linux it works beside the cache file. It has no effect with the per-shader cache files of `SHARPEMU_VK_PIPELINE_CACHE_SHARDS`. | `VulkanVideoPresenter.ShaderPrewarm.cs`, `ShaderPrewarmList.cs`, `ShaderProgramCache.cs` |
 | `SHARPEMU_SKIP_ALL_COMPUTE` | `1` | Set to `1` to make the Metal presenter skip all compute dispatches. The Vulkan presenter reads the value but does not use it. The default is off. | `MetalVideoPresenter.Compute.cs`, `VulkanVideoPresenter.cs` |
 | `SHARPEMU_SKIP_TALL_COMPUTE_Z` | number | Effect not clear from the code. The Vulkan presenter reads the number into a field for a minimum Z group count. No code uses that field. The default is 0. | `VulkanVideoPresenter.cs` |
+| `SHARPEMU_SRT_NATIVE` | `0` | `0` turns off the compiled shader resource (SRT) evaluator. By default, the resource plan of each shader is compiled once to .NET code (`DynamicMethod`) on a low-priority background thread named `SRT compiler`; until it is ready, the plan is evaluated by the interpreter, so the first use of a new shader does not wait for the compilation. With `0`, every plan always uses the interpreter. The compiled path is also off when the runtime does not support dynamic code, for example in a Native AOT build. | `CompiledResourceEvaluator.cs`, `ShaderResourcePlan.cs`, `RuntimeValueEvaluator.cs` |
 | `SHARPEMU_SUSPEND_POINTS_IN_FLIGHT` | `0` | `0` makes `sceAgcSuspendPoint` wait until the frame boundary it queued is processed. The default lets one boundary wait behind the graphics commands, so the guest CPU can run one frame ahead. A wait that follows its own queue's store to the same label still sees that value when the title rewrites the label for the next frame (Dead Cells). | `CommandStreamQueue.cs`, `GpuCommandInterpreter.cs` |
 | `SHARPEMU_VK_DEBUG_LABELS` | `1` | Turns on Vulkan object names and command labels for capture tools. `SHARPEMU_VK_VALIDATION=1` also turns them on. Default is off because the labels add overhead to each draw. | `VulkanVideoPresenter.Draws.Recording.cs` |
 | `SHARPEMU_VK_DEVICE` | text (part of a device name) | Selects the Vulkan device whose name contains this text. The comparison ignores case. When unset, the presenter gives a score to each device and prefers a discrete GPU. | `VulkanVideoPresenter.Device.Setup.cs`, `VulkanVideoPresenter.cs` |

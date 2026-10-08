@@ -127,6 +127,48 @@ public sealed class BoundedFillDetectorTests
         Assert.True(fill.Formatted);
     }
 
+    private static readonly uint[] DemonsSoulsModuloCopy =
+    [
+        0xBEFC03FF, 0xA65CD91E, 0xBF960000, 0xBFA00003, 0xD7460002, 0x04010C0C, 0xF4201A84, 0xFA000000,
+        0xBF8CC07F, 0x7DA8046A, 0xBF88002A, 0xF4200304, 0xFA000004, 0xBF8CC07F, 0x7E000C0C, 0xBF070C80,
+        0x8588807E, 0x7E005700, 0x100000FF, 0x4F800000, 0x7E060F00, 0xD5766A00, 0x0202060C, 0x7D8A0280,
+        0x4C020080, 0x02000101, 0xD56A0001, 0x00020700, 0x4C000303, 0x4A020303, 0x02000101, 0xD56A0000,
+        0x00020500, 0xD5690001, 0x0002000C, 0x4C060302, 0x7D8C02F9, 0x06068A02, 0x7D86060C, 0x87EA6A0A,
+        0x50000080, 0xD5286A00, 0x002A00C1, 0xD5010000, 0x002200C1, 0xD5690000, 0x0002000C, 0x4C000102,
+        0xE0002000, 0x80000000, 0xBF8C3F70, 0xE0102000, 0x80010002, 0xBF810000,
+    ];
+
+    [Fact]
+    public void TheDemonsSoulsModuloCopyIsRecognized()
+    {
+        var program = Decode(DemonsSoulsModuloCopy);
+        var copy = BoundedFillDetector.DetectCopy(program);
+
+        Assert.NotNull(copy);
+        static FillWord User(uint register) => new(FillWordSource.UserData, register, 0, 0);
+        Assert.Equal(12u, copy.GroupScalarRegister);
+        Assert.Equal(new FillWord(FillWordSource.BufferResource, 8, 0, 0), copy.Count);
+        Assert.Equal(new FillWord(FillWordSource.BufferResource, 8, 0, 4), copy.Modulus);
+        Assert.Equal([User(0), User(1), User(2), User(3)], copy.Source);
+        Assert.Equal([User(4), User(5), User(6), User(7)], copy.Destination);
+        Assert.Null(BoundedFillDetector.Detect(program));
+    }
+
+    [Fact]
+    public void AModuloCopyStoringAtTheRemainderIsRejected()
+    {
+        var words = DemonsSoulsModuloCopy.ToArray();
+        words[Array.IndexOf(words, 0x80010002u)] = 0x80010000u;
+        Assert.Null(BoundedFillDetector.DetectCopy(Decode(words)));
+    }
+
+    [Fact]
+    public void FillsAreNotCopies()
+    {
+        Assert.Null(BoundedFillDetector.DetectCopy(Decode(PatternFromUserData)));
+        Assert.Null(BoundedFillDetector.DetectCopy(Decode(ZeroRangeFromConstantBuffer)));
+    }
+
     [Fact]
     public void APatternFillWithAnotherBranchTargetIsRejected()
     {

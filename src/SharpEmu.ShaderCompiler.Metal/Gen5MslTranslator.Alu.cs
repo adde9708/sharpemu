@@ -142,15 +142,15 @@ public static partial class Gen5MslTranslator
                 }
                 case "VCndmaskB32":
                 {
-                    // dst = mask-bit(lane) ? src1 : src0. Sources are raw (no
-                    // float modifiers), matching the SPIR-V translator; the mask
-                    // is VCC for VOP2 and an explicit SGPR operand for VOP3.
+                    // dst = mask-bit(lane) ? src1 : src0. VOP3 abs/neg act on the
+                    // sign bit, matching the SPIR-V translator; the mask is VCC
+                    // for VOP2 and an explicit SGPR operand for VOP3.
                     var mask = instruction.Sources.Count > 2
                         ? MaskBitExpression(instruction.Sources[2])
                         : "vcc";
                     StoreVector(
                         DestinationVector(instruction),
-                        $"({mask}) ? ({RawSource(instruction, 1)}) : ({RawSource(instruction, 0)})");
+                        $"({mask}) ? ({SignModifiedSource(instruction, 1)}) : ({SignModifiedSource(instruction, 0)})");
                     return true;
                 }
             }
@@ -1774,6 +1774,24 @@ public static partial class Gen5MslTranslator
             }
 
             return value;
+        }
+
+        private string SignModifiedSource(Gen5ShaderInstruction instruction, int sourceIndex)
+        {
+            var value = RawSource(instruction, sourceIndex);
+            if (instruction.Control is not Gen5Vop3Control control)
+            {
+                return value;
+            }
+
+            if ((control.AbsoluteMask & (1u << sourceIndex)) != 0)
+            {
+                value = $"(({value}) & 0x7FFFFFFFu)";
+            }
+
+            return (control.NegateMask & (1u << sourceIndex)) != 0
+                ? $"(({value}) ^ 0x80000000u)"
+                : value;
         }
 
         /// <summary>64-bit source: SGPR/VGPR pair, sign-extended inline, or zero-extended 32-bit.</summary>

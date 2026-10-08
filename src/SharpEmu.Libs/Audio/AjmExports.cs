@@ -590,7 +590,16 @@ public static class AjmExports
             return ctx.SetReturn(OrbisAjmErrorJobCreation);
         }
 
-        var status = TryGetInstance(instanceId, out _) ? 0 : Atrac9DecodeState.ResultInvalidParameter;
+        var status = TryGetInstance(instanceId, out var instance) ? 0 : Atrac9DecodeState.ResultInvalidParameter;
+        Span<byte> gapless = stackalloc byte[AjmSidebandGaplessDecodeBytes];
+        if (status == 0 && gaplessAddress != 0 && ctx.Memory.TryRead(gaplessAddress, gapless))
+        {
+            instance!.Atrac9?.SetGapless(
+                BinaryPrimitives.ReadUInt32LittleEndian(gapless),
+                BinaryPrimitives.ReadUInt16LittleEndian(gapless[4..]),
+                reset != 0);
+        }
+
         WriteBasicResult(ctx, resultAddress, status);
         Trace(
             $"batch_job_set_gapless_decode instance=0x{instanceId:X8} " +
@@ -1163,6 +1172,10 @@ public static class AjmExports
 
         if ((flags & AjmJobSidebandFlagGaplessDecode) != 0 && (ulong)(offset + AjmSidebandGaplessDecodeBytes) <= size)
         {
+            var gapless = instance?.Atrac9?.Gapless ?? default;
+            BinaryPrimitives.WriteUInt32LittleEndian(sideband[offset..], gapless.TotalSamples);
+            BinaryPrimitives.WriteUInt16LittleEndian(sideband[(offset + 4)..], gapless.SkipSamples);
+            BinaryPrimitives.WriteUInt16LittleEndian(sideband[(offset + 6)..], gapless.SkippedSamples);
             offset += AjmSidebandGaplessDecodeBytes;
         }
 

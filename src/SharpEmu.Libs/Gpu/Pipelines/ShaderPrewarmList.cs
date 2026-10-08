@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Globalization;
 using System.IO.Hashing;
 using System.Text;
 using SharpEmu.HLE;
@@ -141,6 +142,7 @@ internal sealed class ShaderPrewarmList : IDisposable
 {
     public const string FileName = "shader-prewarm.bin";
     public const string StampFileName = "shader-prewarm.stamp";
+    public const string ProgressFileName = "shader-prewarm.progress";
 
     private const uint Magic = 0x57504553;
     private const uint FormatVersion = 1;
@@ -151,16 +153,19 @@ internal sealed class ShaderPrewarmList : IDisposable
     private readonly object _gate = new();
     private readonly FileStream _file;
     private readonly string _stampPath;
+    private readonly string _progressPath;
+    private readonly object _progressGate = new();
     private readonly HashSet<(ulong Hash, uint CodeSize, ulong Address)> _codes = [];
     private readonly HashSet<ulong> _computes = [];
     private readonly Dictionary<(ulong Hash, uint CodeSize, ulong Address), ShaderCodeCapture> _loadedCodes = new();
     private readonly List<ComputePrewarmRecord> _loadedComputes = [];
     private bool _failed;
 
-    private ShaderPrewarmList(FileStream file, string stampPath)
+    private ShaderPrewarmList(FileStream file, string stampPath, string progressPath)
     {
         _file = file;
         _stampPath = stampPath;
+        _progressPath = progressPath;
     }
 
     public int LoadedComputeCount => _loadedComputes.Count;
@@ -172,7 +177,7 @@ internal sealed class ShaderPrewarmList : IDisposable
             Directory.CreateDirectory(directory);
             var path = Path.Combine(directory, FileName);
             var file = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.Read);
-            var list = new ShaderPrewarmList(file, Path.Combine(directory, StampFileName));
+            var list = new ShaderPrewarmList(file, Path.Combine(directory, StampFileName), Path.Combine(directory, ProgressFileName));
             try
             {
                 list.Load();
@@ -229,6 +234,93 @@ internal sealed class ShaderPrewarmList : IDisposable
             Console.Error.WriteLine($"[LOADER][WARN] Shader prewarm stamp write failed: {exception.Message}");
         }
     }
+
+    public static ulong Identity(ComputePrewarmRecord record) => XxHash3.HashToUInt64(SerializeCompute(record));
+
+    public HashSet<ulong> ReadProgress(string stamp)
+    {
+        var completed = new HashSet<ulong>();
+        lock (_progressGate)
+        {
+            try
+            {
+                if (!File.Exists(_progressPath))
+                {
+                    return completed;
+                }
+
+                var lines = File.ReadAllLines(_progressPath);
+                if (lines.Length == 0 || lines[0] != ProgressKey(stamp))
+                {
+                    File.Delete(_progressPath);
+                    return completed;
+                }
+
+                for (var index = 1; index < lines.Length; index++)
+                {
+                    if (ulong.TryParse(lines[index], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var identity))
+                    {
+                        completed.Add(identity);
+                    }
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                completed.Clear();
+            }
+        }
+
+        return completed;
+    }
+
+    public void AppendProgress(string stamp, IReadOnlyCollection<ulong> identities)
+    {
+        if (identities.Count == 0)
+        {
+            return;
+        }
+
+        lock (_progressGate)
+        {
+            try
+            {
+                var lines = new List<string>(identities.Count + 1);
+                if (!File.Exists(_progressPath))
+                {
+                    lines.Add(ProgressKey(stamp));
+                }
+
+                foreach (var identity in identities)
+                {
+                    lines.Add(identity.ToString("X16", CultureInfo.InvariantCulture));
+                }
+
+                File.AppendAllLines(_progressPath, lines);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                Console.Error.WriteLine($"[LOADER][WARN] Shader prewarm progress write failed: {exception.Message}");
+            }
+        }
+    }
+
+    public void ClearProgress()
+    {
+        lock (_progressGate)
+        {
+            try
+            {
+                File.Delete(_progressPath);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                Console.Error.WriteLine($"[LOADER][WARN] Shader prewarm progress clear failed: {exception.Message}");
+            }
+        }
+    }
+
+    private static string ProgressKey(string stamp) =>
+        XxHash3.HashToUInt64(Encoding.UTF8.GetBytes(stamp)).ToString("X16", CultureInfo.InvariantCulture);
 
     public void RecordCompute(ShaderCodeCapture code, ComputePrewarmRecord record)
     {

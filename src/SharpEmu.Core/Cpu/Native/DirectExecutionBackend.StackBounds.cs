@@ -9,10 +9,23 @@ public sealed partial class DirectExecutionBackend
 {
     private const int HostStackStateBytes = 3 * sizeof(ulong);
 
-    private static unsafe bool TryGetGuestStackBounds(ulong stackPointer, out ulong bottom, out ulong top)
+    internal static unsafe bool TryGetGuestStackBounds(ulong stackPointer, out ulong bottom, out ulong top)
     {
+        if (OperatingSystem.IsWindows() &&
+            QueryVirtualMemoryInformation(-1, (void*)stackPointer, 0, out var allocation,
+                (nuint)sizeof(StackMemoryRegionInformation), null) != 0 &&
+            ((allocation.Flags & 1) == 0 || allocation.CommitSize == allocation.RegionSize) &&
+            allocation.RegionSize != 0 && allocation.RegionSize <= ulong.MaxValue - allocation.AllocationBase &&
+            stackPointer >= allocation.AllocationBase && stackPointer - allocation.AllocationBase < allocation.RegionSize)
+        {
+            bottom = allocation.AllocationBase;
+            top = bottom + allocation.RegionSize;
+            return true;
+        }
+
         bottom = top = 0;
-        if (VirtualQuery((void*)stackPointer, out var region, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 ||
+        var queried = VirtualQuery((void*)stackPointer, out var region, (nuint)sizeof(MEMORY_BASIC_INFORMATION64));
+        if (queried == 0 ||
             region.State != 0x1000 || region.RegionSize == 0 || region.RegionSize > ulong.MaxValue - region.BaseAddress)
         {
             return false;
@@ -176,4 +189,18 @@ public sealed partial class DirectExecutionBackend
 
     [DllImport("kernel32.dll", ExactSpelling = true)]
     private static extern void GetCurrentThreadStackLimits(out ulong lowLimit, out ulong highLimit);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct StackMemoryRegionInformation
+    {
+        public ulong AllocationBase;
+        public uint AllocationProtect;
+        public uint Flags;
+        public ulong RegionSize;
+        public ulong CommitSize;
+    }
+
+    [DllImport("api-ms-win-core-memory-l1-1-4.dll", ExactSpelling = true)]
+    private static extern unsafe int QueryVirtualMemoryInformation(nint process, void* address, int informationClass,
+        out StackMemoryRegionInformation information, nuint informationSize, nuint* returnSize);
 }

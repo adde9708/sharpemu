@@ -412,8 +412,7 @@ Request = request,
             }
             using var profileScope = BufferUploadProfile.BeginSweep(vertexProgramHash, pixelProgramHash, computeProgramHash);
             var memory = GuestGpuMemoryHook.Current ?? throw SubmissionScheduler.Fatal("A device-address program needs the guest GPU memory registry.");
-            var spans = new List<GuestSpan>();
-            memory.ForEachSpan((address, size) => spans.Add(new GuestSpan(address, size)));
+            var spans = DeviceAddressSpans(memory);
             var traceAddress = GuestGpuMemoryHook.TraceAddress;
             if (traceAddress != 0)
             {
@@ -430,7 +429,29 @@ Request = request,
             if (traceAddress != 0 && !memory.Covers(traceAddress, 1))
                 GuestGpuMemoryHook.Trace(traceAddress, 1,
                     $"device-address-mapping-check readable={_guestMemory.CanRead(traceAddress, 1)} backed={_guestBacking.IsBackedView(traceAddress)}");
-            _bufferCache.PrepareBda(spans);
+            _bufferCache.PrepareBda(spans, _bdaSpanMapping);
+        }
+
+        private List<GuestSpan>? _bdaSpans;
+        private GuestGpuMemory? _bdaSpanMemory;
+        private long _bdaSpanVersion = -1;
+        private ulong _bdaSpanMapping;
+
+        private List<GuestSpan> DeviceAddressSpans(GuestGpuMemory memory)
+        {
+            var version = memory.SpanVersion;
+            if (_bdaSpans is { } cached && ReferenceEquals(_bdaSpanMemory, memory) && _bdaSpanVersion == version)
+            {
+                return cached;
+            }
+
+            var spans = new List<GuestSpan>();
+            memory.ForEachSpan((address, size) => spans.Add(new GuestSpan(address, size)));
+            _bdaSpans = spans;
+            _bdaSpanMemory = memory;
+            _bdaSpanVersion = version;
+            _bdaSpanMapping = GuestBufferCache.MappingKey(spans);
+            return spans;
         }
 
         public void BindResources(IPreparedBindings prepared)

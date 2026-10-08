@@ -185,6 +185,7 @@ public static partial class Gen5SpirvTranslator
         private uint _layerOutput;
         private uint _viewportIndexOutput;
         private uint _clipDistanceCount;
+        private uint _invalidPositionClipDistance = uint.MaxValue;
         private uint _cullDistanceCount;
         private uint _vertexIndexInput;
         private uint _instanceIndexInput;
@@ -1400,6 +1401,11 @@ public static partial class Gen5SpirvTranslator
                     _floatType,
                     fragCoord,
                     component);
+                if (component == 3)
+                {
+                    value = _module.AddInstruction(SpirvOp.FDiv, _floatType, Float(1f), value);
+                }
+
                 StoreV(vgpr, Bitcast(_uintType, value), guardWithExec: false);
             }
 
@@ -6605,6 +6611,20 @@ public static partial class Gen5SpirvTranslator
                 outputValue,
                 Load(_vec4Type, outputVariable));
             Store(outputVariable, outputValue);
+            if (export.Target == 12 && _invalidPositionClipDistance != uint.MaxValue)
+            {
+                var equal = _module.AddInstruction(
+                    SpirvOp.FOrdEqual,
+                    _module.TypeVector(_boolType, 4),
+                    outputValue,
+                    _module.ConstantNull(_vec4Type));
+                var invalid = _module.AddInstruction(SpirvOp.All, _boolType, equal);
+                // A zero position has an undefined perspective divide. Collapse its primitive
+                // to the remaining edge, as the guest's clipping-error cull does.
+                var distance = _module.AddInstruction(
+                    SpirvOp.Select, _floatType, invalid, Float(-1f), Float(0f));
+                StoreDistanceConditional(_clipDistanceOutput, _invalidPositionClipDistance, distance);
+            }
             return true;
         }
 
@@ -6711,6 +6731,14 @@ public static partial class Gen5SpirvTranslator
                         cullCount = Math.Max(cullCount, output.CullDistance + 1);
                     }
                 }
+            }
+
+            if (_request.SupportsClipDistance && clipCount + cullCount < 8 &&
+                _request.Program.Instructions.Any(static instruction =>
+                    instruction.Control is Gen5ExportControl { Target: 12, EnableMask: not 0 }))
+            {
+                // Use a separate plane so auxiliary position exports keep their own distances.
+                _invalidPositionClipDistance = clipCount++;
             }
 
             if (needPointSize)
@@ -7458,11 +7486,12 @@ public static partial class Gen5SpirvTranslator
         private List<(uint Register, uint Lane)> FindLaneSpillSlots()
         {
             var slots = new List<(uint Register, uint Lane)>();
-            if (UsesSubgroupOperations())
+            if (_emulateWave64)
             {
                 return slots;
             }
 
+            var ownsLaneZero = !UsesSubgroupOperations();
             var readRegisters = _request.Program.Instructions
                 .Where(static instruction => instruction.Opcode == "VReadlaneB32" &&
                     instruction.Sources.Count > 0 &&
@@ -7475,7 +7504,7 @@ public static partial class Gen5SpirvTranslator
                     TryGetVectorDestination(instruction, out var register) &&
                     readRegisters.Contains(register) &&
                     TryGetConstantLane(instruction, out var lane) &&
-                    lane != 0 &&
+                    (lane != 0 || !ownsLaneZero) &&
                     !slots.Contains((register, lane)))
                 {
                     slots.Add((register, lane));
@@ -7506,8 +7535,26 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
-            lane = value & (_waveLaneCount - 1);
+            lane = value & LaneSelectMask;
             return true;
+        }
+
+        private uint LaneSelectMask => _stage == Gen5SpirvStage.Compute ? _waveLaneCount - 1 : 63u;
+
+        private uint ReadLaneSpillSlot(Gen5ShaderInstruction instruction, uint selectedLane, uint value)
+        {
+            if (instruction.Sources[0].Kind != Gen5OperandKind.VectorRegister)
+            {
+                return value;
+            }
+
+            var register = instruction.Sources[0].Value;
+            if (TryGetConstantLane(instruction, out var lane))
+            {
+                return _laneSpillSlots.TryGetValue((register, lane), out var slot) ? Load(_uintType, slot) : value;
+            }
+
+            return SelectLaneSpillSlot(register, selectedLane, value);
         }
 
         // Folds the spill slots of register into value: selected lane == slot lane reads the slot.

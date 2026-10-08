@@ -167,8 +167,7 @@ public static class ResourceMaterializer
                     for (var candidateIndex = 0; candidateIndex < descriptors.Count; candidateIndex++)
                     {
                         var descriptor = descriptors[candidateIndex];
-                        if (NullImageDescriptor(descriptor.Dwords) || !ValidImageDescriptor(descriptor.Dwords, image.R128) ||
-                            !ReservedImageBitsClear(descriptor.Dwords))
+                        if (!UsableImageCandidate(descriptor.Dwords, image.R128))
                             descriptor = DescriptorWords.Empty(8);
                         var existing = directTable.Descriptors.FindIndex(candidate => candidate.SameAs(descriptor));
                         if (existing < 0)
@@ -474,6 +473,19 @@ public static class ResourceMaterializer
         return value.ToString();
     }
 
+    private static readonly HashSet<uint> NulledSampledFormats = new();
+
+    private static void ReportNulledSampledFormat(uint format)
+    {
+        lock (NulledSampledFormats)
+        {
+            if (NulledSampledFormats.Add(format))
+            {
+                Console.Error.WriteLine($"[GPU][WARN] A sampled image descriptor uses unsupported format {format}; it is bound as a null texture.");
+            }
+        }
+    }
+
     private static bool NullImageDescriptor(ReadOnlySpan<uint> descriptor) =>
         descriptor[0] == 0 && (descriptor[1] & 0xFF) == 0;
 
@@ -530,6 +542,10 @@ public static class ResourceMaterializer
 
         return true;
     }
+
+    private static bool UsableImageCandidate(ReadOnlySpan<uint> candidate, bool r128) =>
+        !NullImageDescriptor(candidate) && ValidImageDescriptor(candidate, r128) && ReservedImageBitsClear(candidate) &&
+        GuestImageFormat.SampledNumericClass(GuestImageFormat.FormatOf(candidate)) != ImageNumericClass.Unsupported;
 
     private static ulong ScalarBufferSize(ReadOnlySpan<uint> descriptor)
     {
@@ -640,8 +656,7 @@ public static class ResourceMaterializer
                 }
             }
 
-            if (NullImageDescriptor(candidate) || !ValidImageDescriptor(candidate, image.R128) ||
-                !ReservedImageBitsClear(candidate))
+            if (!UsableImageCandidate(candidate, image.R128))
             {
                 Array.Clear(candidate);
             }
@@ -694,8 +709,7 @@ public static class ResourceMaterializer
                     return false;
             }
 
-            if (NullImageDescriptor(candidate) || !ValidImageDescriptor(candidate, r128) ||
-                !ReservedImageBitsClear(candidate))
+            if (!UsableImageCandidate(candidate, r128))
                 Array.Clear(candidate);
             probed.Add(candidate);
         }
@@ -752,7 +766,7 @@ public static class ResourceMaterializer
                     return false;
             }
 
-            if (NullImageDescriptor(candidate) || !ValidImageDescriptor(candidate, r128) || !ReservedImageBitsClear(candidate))
+            if (!UsableImageCandidate(candidate, r128))
                 Array.Clear(candidate);
             probed.Add(candidate);
             offsets.Add(unchecked(indirect.DynamicOffsetBase + (key << 5)));
@@ -1053,7 +1067,19 @@ public static class ResourceMaterializer
                     numericClass = ImageNumericClass.Uint;
                 }
             }
-            else if (numericClass == ImageNumericClass.Unsupported || (baseImage.DepthCompare && numericClass != ImageNumericClass.Float))
+            else if (numericClass == ImageNumericClass.Unsupported)
+            {
+                ReportNulledSampledFormat(format);
+                Array.Clear(descriptor);
+                images[index] = image with
+                {
+                    NumericClass = ImageNumericClass.Float,
+                    Dimension = ImageDimension.Dim2D,
+                    Cube = false,
+                };
+                continue;
+            }
+            else if (baseImage.DepthCompare && numericClass != ImageNumericClass.Float)
             {
                 return Fail($"sampled image descriptor {index} uses unsupported format {format}");
             }

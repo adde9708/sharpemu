@@ -460,6 +460,72 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         return true;
     }
 
+    public const ulong MaxHostCopyWords = 64 * 1024;
+
+    public bool TryCopyWordsOnHost(ulong destination, ulong source, ulong sourceWords, ulong words)
+    {
+        if (destination == 0 || source == 0 || sourceWords == 0 || words == 0 || ((destination | source) & 3) != 0 ||
+            words > MaxHostCopyWords || sourceWords > MaxHostCopyWords)
+        {
+            return false;
+        }
+
+        var size = words * sizeof(uint);
+        var sourceSize = Math.Min(sourceWords, words) * sizeof(uint);
+        if (size > ulong.MaxValue - destination || sourceSize > ulong.MaxValue - source ||
+            (source < destination + size && destination < source + sourceSize))
+        {
+            return false;
+        }
+
+        var images = RequireImageCache();
+        var sourceRegion = images.QueryRegion(source, sourceSize);
+        var destinationRegion = images.QueryRegion(destination, size);
+        if (HasGpuDirtyBytes(source, sourceSize) || HasGpuDirtyBytes(destination, size) ||
+            sourceRegion.GpuImageBytes || destinationRegion.GpuImageBytes)
+        {
+            return false;
+        }
+
+        var pattern = System.Buffers.ArrayPool<byte>.Shared.Rent((int)sourceSize);
+        var chunk = System.Buffers.ArrayPool<byte>.Shared.Rent((int)Math.Min(size, 64UL * 1024));
+        try
+        {
+            if (!_backing.TryReadBacking(source, pattern.AsSpan(0, (int)sourceSize)))
+            {
+                return false;
+            }
+
+            if (destinationRegion.ImageBytes)
+            {
+                images.InvalidateMemory(destination, size);
+            }
+
+            var chunkLength = (ulong)(chunk.Length - chunk.Length % sizeof(uint));
+            for (ulong offset = 0; offset < size;)
+            {
+                var length = (int)Math.Min(size - offset, chunkLength);
+                for (var filled = 0; filled < length;)
+                {
+                    var patternOffset = (int)((offset + (ulong)filled) % sourceSize);
+                    var copied = Math.Min(length - filled, (int)sourceSize - patternOffset);
+                    pattern.AsSpan(patternOffset, copied).CopyTo(chunk.AsSpan(filled, copied));
+                    filled += copied;
+                }
+
+                WriteHostMemory(destination + offset, chunk.AsSpan(0, length));
+                offset += (ulong)length;
+            }
+
+            return true;
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(pattern);
+            System.Buffers.ArrayPool<byte>.Shared.Return(chunk);
+        }
+    }
+
     public void CopyBuffer(ulong dstVaddr, ulong srcVaddr, ulong size, bool dstGds, bool srcGds)
     {
         var dstMemory = !dstGds;
@@ -557,7 +623,21 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
     private ulong _bdaTouchTick = ulong.MaxValue;
     private ulong _bdaTouchMapping;
 
+    public static ulong MappingKey(IReadOnlyCollection<GuestSpan> spans)
+    {
+        var mapping = (ulong)spans.Count;
+        foreach (var span in spans)
+            mapping = (mapping ^ span.Address ^ (span.Size << 17)) * 0x100000001B3UL;
+        return mapping;
+    }
+
     public void PrepareBda(IEnumerable<GuestSpan> mapped)
+    {
+        var spans = mapped as IReadOnlyCollection<GuestSpan> ?? mapped.ToList();
+        PrepareBda(spans, MappingKey(spans));
+    }
+
+    public void PrepareBda(IReadOnlyCollection<GuestSpan> mapped, ulong mapping)
     {
         var traceAddress = GuestGpuMemoryHook.TraceAddress;
         var traceCovered = false;
@@ -572,10 +652,7 @@ public sealed unsafe class GuestBufferCache : IGuestBufferStore, IDisposable
         }
         else
         {
-            var spans = mapped as IReadOnlyCollection<GuestSpan> ?? mapped.ToList();
-            var mapping = (ulong)spans.Count;
-            foreach (var span in spans)
-                mapping = (mapping ^ span.Address ^ (span.Size << 17)) * 0x100000001B3UL;
+            var spans = mapped;
             if (_retirementPolicy.CurrentTick != _bdaTouchTick || mapping != _bdaTouchMapping)
             {
                 foreach (var span in spans)

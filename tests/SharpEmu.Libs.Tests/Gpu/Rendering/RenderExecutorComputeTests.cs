@@ -416,6 +416,83 @@ public sealed class RenderExecutorComputeTests : IDisposable
         AssertNotDispatched();
     }
 
+    private const ulong CopySource = RecordingRenderHost.MemoryBase + 0x71_0000;
+
+    private void ConfigureBoundedCopy(uint count, uint modulus, uint sourceRecords, uint destinationRecords, uint sourceFormat = Format32UInt)
+    {
+        static SharpEmu.Libs.Gpu.Pipelines.FillWord User(uint register) =>
+            new(SharpEmu.Libs.Gpu.Pipelines.FillWordSource.UserData, register, 0, 0);
+        _host.WriteGuest(FillParameters, [.. BitConverter.GetBytes(count), .. BitConverter.GetBytes(modulus)]);
+        var copy = new SharpEmu.Libs.Gpu.Pipelines.BoundedCopy(
+            12,
+            new SharpEmu.Libs.Gpu.Pipelines.FillWord(SharpEmu.Libs.Gpu.Pipelines.FillWordSource.BufferResource, 8, 0, 0),
+            new SharpEmu.Libs.Gpu.Pipelines.FillWord(SharpEmu.Libs.Gpu.Pipelines.FillWordSource.BufferResource, 8, 0, 4),
+            [User(0), User(1), User(2), User(3)],
+            [User(4), User(5), User(6), User(7)]);
+        var program = new ShaderProgramInfo { Stage = ShaderStageKind.Compute, Hash = 0xF333, BoundedCopy = copy };
+        var source = BufferDescriptor(CopySource, 4, sourceRecords, format: sourceFormat);
+        var destination = BufferDescriptor(MetadataAddress, 4, destinationRecords, format: Format32UInt);
+        var parameters = BufferDescriptor(FillParameters, 16, 1, format: 0);
+        var input = ComputeProgram(Stage(program, userData: [.. source, .. destination, .. parameters])).Input;
+        _pipelines.Compute = new ComputeProgram
+        {
+            Program = new ShaderProgram(0x33),
+            Input = new ComputeInputInfo
+            {
+                ThreadsX = 64, ThreadsY = 1, ThreadsZ = 1, GroupIdX = true, ThreadIdCount = 1, WaveSize = 64,
+                WorkgroupRegister = 12, Stage = input.Stage,
+            },
+        };
+    }
+
+    [Fact]
+    public void BoundedCopy_BecomesAHostCopyAndRecordsNothing()
+    {
+        ConfigureBoundedCopy(count: 0x98, modulus: 0x98, sourceRecords: 0x98, destinationRecords: 0x98);
+        _executor.Dispatch(1, Banks(), 3, 1, 1, 0x41);
+
+        Assert.Contains($"host_copy {MetadataAddress:X} {CopySource:X} 152 152", _host.Calls);
+        AssertNotDispatched();
+        Assert.Contains("reset_bindings", _host.Calls);
+    }
+
+    [Fact]
+    public void BoundedCopy_IsClampedToTheThreadsAndTheDestinationRecords()
+    {
+        ConfigureBoundedCopy(count: 0x1000, modulus: 4, sourceRecords: 4, destinationRecords: 0x400);
+        _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
+        Assert.Contains($"host_copy {MetadataAddress:X} {CopySource:X} 4 256", _host.Calls);
+
+        ConfigureBoundedCopy(count: 0x1000, modulus: 4, sourceRecords: 4, destinationRecords: 0x20);
+        _executor.Dispatch(1, Banks(), 4, 1, 1, 0x41);
+        Assert.Contains($"host_copy {MetadataAddress:X} {CopySource:X} 4 32", _host.Calls);
+        AssertNotDispatched();
+    }
+
+    [Theory]
+    [InlineData(0u, 4u, Format32UInt)]
+    [InlineData(8u, 4u, Format32UInt)]
+    [InlineData(4u, 4u, 22u)]
+    public void BoundedCopyThatIsNotAPlainWordCopy_IsDispatched(uint modulus, uint sourceRecords, uint sourceFormat)
+    {
+        ConfigureBoundedCopy(count: 0x40, modulus: modulus, sourceRecords: sourceRecords, destinationRecords: 0x40, sourceFormat: sourceFormat);
+        _executor.Dispatch(1, Banks(), 1, 1, 1, 0x41);
+
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("host_copy", StringComparison.Ordinal));
+        AssertDispatched(1, 1, 1);
+    }
+
+    [Fact]
+    public void BoundedCopyTheHostRefuses_IsDispatched()
+    {
+        _host.HostCopyAccepted = false;
+        ConfigureBoundedCopy(count: 0x40, modulus: 0x40, sourceRecords: 0x40, destinationRecords: 0x40);
+        _executor.Dispatch(1, Banks(), 1, 1, 1, 0x41);
+
+        Assert.Contains($"host_copy {MetadataAddress:X} {CopySource:X} 64 64", _host.Calls);
+        AssertDispatched(1, 1, 1);
+    }
+
     private void ConfigurePatternFill(uint count, uint length, uint[] pattern)
     {
         static SharpEmu.Libs.Gpu.Pipelines.FillWord User(uint register) =>

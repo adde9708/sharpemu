@@ -120,6 +120,52 @@ public sealed class ShaderPrewarmListTests : IDisposable
     }
 
     [Fact]
+    public void ProgressResumesUnderTheSameStampAndClears()
+    {
+        using (var list = Open())
+        {
+            Assert.Empty(list.ReadProgress("build-a"));
+            list.AppendProgress("build-a", [1UL, 2UL]);
+            list.AppendProgress("build-a", [0xFEDC_BA98_7654_3210UL]);
+        }
+
+        using (var reopened = Open())
+        {
+            Assert.Equal(new HashSet<ulong> { 1UL, 2UL, 0xFEDC_BA98_7654_3210UL }, reopened.ReadProgress("build-a"));
+            reopened.ClearProgress();
+            Assert.Empty(reopened.ReadProgress("build-a"));
+        }
+    }
+
+    [Fact]
+    public void ProgressOfAnotherStampIsDiscarded()
+    {
+        using var list = Open();
+        list.AppendProgress("build-a", [7UL]);
+
+        Assert.Empty(list.ReadProgress("build-b"));
+        Assert.Empty(list.ReadProgress("build-a"));
+        list.AppendProgress("build-b", [8UL]);
+        Assert.Equal(new HashSet<ulong> { 8UL }, list.ReadProgress("build-b"));
+    }
+
+    [Fact]
+    public void ARecordIdentityDependsOnItsSpecialization()
+    {
+        using (var list = Open())
+        {
+            _ = CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+            _ = CompileAtRuntime(list, BufferDescriptorWords.Format32x4UInt);
+        }
+
+        using var reloaded = Open();
+        var identities = reloaded.LoadedComputes().Select(item => ShaderPrewarmList.Identity(item.Record)).ToArray();
+        Assert.Equal(2, identities.Length);
+        Assert.NotEqual(identities[0], identities[1]);
+        Assert.Equal(identities[0], ShaderPrewarmList.Identity(reloaded.LoadedComputes()[0].Record));
+    }
+
+    [Fact]
     public void RecordedReadsReplayAsMergedRanges()
     {
         var memory = new FakeCpuMemory(PipelineTestGuest.MemoryBase, 0x1000);

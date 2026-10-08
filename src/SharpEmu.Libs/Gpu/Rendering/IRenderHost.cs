@@ -188,5 +188,7 @@ public interface IRenderHost
 
     bool TryFillDccMetadata(ulong address, ulong size, uint fillValue);
 
+    bool TryCopyWordsOnHost(ulong destination, ulong source, ulong sourceWords, ulong words);
+
     Exception Fatal(string message);
 }

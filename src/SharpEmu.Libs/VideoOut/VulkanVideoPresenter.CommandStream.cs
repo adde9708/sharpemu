@@ -40,6 +40,7 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         EnsureStarted(1280, 720);
+        WaitForShaderPrewarm("first GPU submission");
         // Queue publication precedes device initialization; only the render thread consumes it.
         lock (_gate)
         {
@@ -70,6 +71,26 @@ internal static unsafe partial class VulkanVideoPresenter
             : TestCommandStreamFactory?.Invoke(memory) is { } testStream
                 ? testStream.Done()
                 : IdleOutcome.Completed;
+
+    public static void RunAfterPendingCommandStreams(Action work)
+    {
+        ArgumentNullException.ThrowIfNull(work);
+        if (TryGetActivePresenter(out var presenter))
+        {
+            if (presenter.Relay.TryRunAfterAcceptedCommandStreams(work))
+            {
+                return;
+            }
+
+            if (!HostSessionControl.IsShutdownRequested && !Volatile.Read(ref _closed) &&
+                !Volatile.Read(ref _presenterCloseRequested))
+            {
+                throw SubmissionScheduler.Fatal("The GPU worker rejected an ordered video-out state change.");
+            }
+        }
+
+        work();
+    }
 
     // The blocked heads of the stream this memory submits to; null when no stream exists for it.
     internal static BlockedSnapshot? SnapshotBlockedCommandStream(ICpuMemory? memory)
@@ -117,6 +138,7 @@ internal static unsafe partial class VulkanVideoPresenter
         _ = width;
         _ = height;
         _ = pitchInPixel;
+        WaitForShaderPrewarm("first flip");
         if (!IsKnownDisplayBuffer(address) || !TryGetActivePresenter(out var presenter))
         {
             return false;

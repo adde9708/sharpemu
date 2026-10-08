@@ -134,7 +134,7 @@ public sealed partial class DirectExecutionBackend
 			try
 			{
 				var state = _activeGuestThreadState;
-				if (state is { Name: "tbb_thead" })
+				if (LogThreadMode && state is { Name: "tbb_thead" })
 				{
 					var n = Interlocked.Increment(ref _tbbNativeRunEnterCount);
 					if (n <= 12 || n % 64 == 0)

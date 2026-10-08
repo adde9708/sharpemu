@@ -9,15 +9,19 @@ namespace SharpEmu.Libs.Diagnostics;
 
 internal static class DccWriterTrace
 {
-    private const int MaxReports = 64;
+    private const int MaxReports = 256;
     private const int MaxFrames = 12;
 
     private static readonly bool DccEnabled =
         Environment.GetEnvironmentVariable("SHARPEMU_TRACE_DCC_WRITERS") == "1";
 
-    private static readonly ulong TargetAddress = ParseAddress(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_WRITER_ADDRESS"));
+    private static readonly ulong[] TargetAddresses = (Environment.GetEnvironmentVariable("SHARPEMU_TRACE_WRITER_ADDRESS") ?? string.Empty)
+        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Select(ParseAddress)
+        .Where(address => address != 0)
+        .ToArray();
 
-    public static readonly bool Enabled = DccEnabled || TargetAddress != 0;
+    public static readonly bool Enabled = DccEnabled || TargetAddresses.Length != 0;
 
     [ThreadStatic]
     public static ulong CurrentProgram;
@@ -43,7 +47,7 @@ internal static class DccWriterTrace
 
     public static void Record(IGuestImageCache images, ulong address, ulong size)
     {
-        var targeted = TargetAddress != 0 && TargetAddress >= address && TargetAddress - address < size;
+        var targeted = TargetAddresses.Any(target => target >= address && target - address < size);
         if (_reported.Count >= MaxReports || (!targeted && !(DccEnabled && images.OverlapsDccMetadata(address, size))) ||
             !_reported.Add((address, size, CurrentProgram)))
         {
