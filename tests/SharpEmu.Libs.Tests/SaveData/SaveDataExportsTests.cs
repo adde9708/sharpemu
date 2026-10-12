@@ -243,8 +243,27 @@ public sealed class SaveDataExportsTests : IDisposable
                 Reg(rdi: MountPointStr, rsi: MountInfo)));
         Assert.True(_ctx.TryReadUInt64(MountInfo, out var blocks));
         Assert.True(_ctx.TryReadUInt64(MountInfo + 0x08, out var freeBlocks));
-        Assert.Equal(16384UL, blocks);
-        Assert.Equal(16382UL, freeBlocks);
+        Assert.Equal(48UL, blocks);
+        Assert.Equal(46UL, freeBlocks);
+    }
+
+    [Fact]
+    public void GetMountInfo_WritesOnlyTheGuestStructure()
+    {
+        Assert.Equal(0, Mount());
+        WriteAscii(MountPointStr, MountPoint);
+        Span<byte> sentinel = stackalloc byte[0x10];
+        sentinel.Fill(0xCD);
+        Assert.True(_memory.TryWrite(MountInfo + 0x30, sentinel));
+
+        Assert.Equal(
+            0,
+            SaveDataExports.SaveDataGetMountInfo(
+                Reg(rdi: MountPointStr, rsi: MountInfo)));
+
+        Span<byte> after = stackalloc byte[0x10];
+        Assert.True(_memory.TryRead(MountInfo + 0x30, after));
+        Assert.True(after.SequenceEqual(sentinel));
     }
 
     [Fact]
@@ -271,8 +290,8 @@ public sealed class SaveDataExportsTests : IDisposable
                 Reg(rdi: SearchCond, rsi: SearchResult)));
         Assert.True(_ctx.TryReadUInt64(SearchInfos, out var blocks));
         Assert.True(_ctx.TryReadUInt64(SearchInfos + 0x08, out var freeBlocks));
-        Assert.Equal(16384UL, blocks);
-        Assert.Equal(16382UL, freeBlocks);
+        Assert.Equal(48UL, blocks);
+        Assert.Equal(46UL, freeBlocks);
     }
 
     [Fact]
